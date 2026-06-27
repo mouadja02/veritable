@@ -1,0 +1,21 @@
+services:
+  # For local development
+  postgres:
+    image: postgres:15.3-alpine
+    container_name: veritable-postgres
+    environment:
+      POSTGRES_USER: veritable
+      POSTGRES_PASSWORD: veritable
+      POSTGRES_DB: veritable
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+  # duckdb:
+  #   image: duckdb/duckdb:latest
+  #   container_name: veritable-duckdb
+  #   stdin_open: true
+  #   tty: true
+  #   command: ["/duckdb", "/data/veritable.duckdb"]
+  #   volumes:
+  #     - ./data/duckdb:/data

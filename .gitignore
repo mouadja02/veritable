@@ -1,0 +1,10 @@
+.env
+data/
+
+# Notes
+NOTES.md
+
+
+# Added by cargo
+
+/target

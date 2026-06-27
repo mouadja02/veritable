@@ -1,0 +1,9 @@
+[package]
+name = "vrtb-duck"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vrtb-core = { path = "../vrtb-core" }
+duckdb = "1"
+async-trait = "0.1"
