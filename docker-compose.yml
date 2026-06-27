@@ -4,9 +4,9 @@ services:
     image: postgres:15.3-alpine
     container_name: veritable-postgres
     environment:
-      POSTGRES_USER: veritable
-      POSTGRES_PASSWORD: veritable
-      POSTGRES_DB: veritable
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-veritable}
+      POSTGRES_DB: ${POSTGRES_DB:-veritable}
     ports:
       - "5432:5432"
     volumes:

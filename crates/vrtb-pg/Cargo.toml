@@ -1,9 +1,0 @@
-[package]
-name = "vrtb-pg"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-vrtb-core = { path = "../vrtb-core" }
-tokio-postgres = "0.7"
-async-trait = "0.1"

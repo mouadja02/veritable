@@ -1,0 +1,18 @@
+[package]
+name = "vrtb-connectors"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["postgres", "duckdb"]
+postgres = ["dep:tokio-postgres", "dep:tokio"]
+duckdb = ["dep:duckdb"]
+
+[dependencies]
+vrtb-core = { path = "../vrtb-core" }
+async-trait = "0.1"
+dotenvy = "0.15"
+
+tokio-postgres = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
+duckdb = { version = "1", features = ["bundled"], optional = true }
