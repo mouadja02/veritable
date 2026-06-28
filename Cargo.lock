@@ -948,9 +948,9 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.12"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9155a582abd142abc056962c29e3ce5ff2ad5469f4246b537ed42c5deba857da"
+checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
 dependencies = [
  "typenum",
 ]
@@ -2535,20 +2535,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "tokio",
- "vrtb-connectors",
  "vrtb-core",
-]
-
-[[package]]
-name = "vrtb-connectors"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dotenvy",
- "duckdb",
- "tokio",
- "tokio-postgres",
- "vrtb-core",
+ "vrtb-duck",
+ "vrtb-pg",
 ]
 
 [[package]]
@@ -2557,6 +2546,26 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "thiserror",
+]
+
+[[package]]
+name = "vrtb-duck"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "duckdb",
+ "vrtb-core",
+]
+
+[[package]]
+name = "vrtb-pg"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dotenvy",
+ "tokio",
+ "tokio-postgres",
+ "vrtb-core",
 ]
 
 [[package]]

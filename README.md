@@ -62,3 +62,19 @@ cargo run -p vrtb-cli         # runs the veritable binary
 ```
 
 DuckDB is embedded (via the `duckdb` crate), no container needed — the file lives at `data/duckdb/veritable.duckdb`.
+
+## 7. Normalization — the hard part
+
+Cross-engine checksums only work if both engines render every value into an identical canonical text string in SQL. Each dialect has its own `canonical_expr()` that maps a column type to a VARCHAR-producing SQL expression. The universal wrapper `CASE WHEN col IS NULL THEN 'n' ELSE 'v' || <canonical> END` avoids NULL/sentinel collisions by construction.
+
+Current canonical forms per engine (every added databse in the future engine must be analyzed and mapped in the same way):
+
+| Type | PostgreSQL | DuckDB |
+|------|-----------|--------|
+| Integer | `CAST(col AS VARCHAR)` | `CAST(col AS VARCHAR)` |
+| Decimal | `CAST(ROUND(col::NUMERIC, scale) AS VARCHAR)` | `CAST(ROUND(col::NUMERIC, scale) AS VARCHAR)` |
+| Timestamp | `TO_CHAR(col, 'YYYY-MM-DD HH24:MI:SS.US')` | `STRFTIME(col::TIMESTAMP, '%Y-%m-%d %H:%M:%S.%f')` |
+| Boolean | `CASE WHEN col THEN '1' ELSE '0' END` | `CASE WHEN col THEN '1' ELSE '0' END` |
+| String | `CAST(col AS VARCHAR)` | `CAST(col AS VARCHAR)` |
+| Float | excluded from hashing by default — compared at leaf level with `--float-tolerance` | same |
+

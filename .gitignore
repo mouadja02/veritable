@@ -1,5 +1,7 @@
 .env
 data/
+testdata/
+
 
 # Notes
 NOTES.md
