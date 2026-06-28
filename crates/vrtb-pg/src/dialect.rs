@@ -1,4 +1,7 @@
-struct PgDialect;
+use vrtb_core::engine::{ColumnSchema, LogicalType, TableRef, ComparePlan, Segment, Dialect};
+use vrtb_core::error::Result;
+
+pub struct PgDialect;
 
 // 2^64, as text, for the modular-sum arithmetic below. Postgres NUMERIC handles
 const TWO_POW_64: &str = "18446744073709551616";
@@ -42,15 +45,18 @@ fn canonical_expr(col: &ColumnSchema) -> Result<String> {
         // col.ty — two sides at scale 2 vs 4 is an error unless --coerce-scale.
         
         
-        // Timestamp — correct target form (UTC-normalized, fixed width):
+        // Timestamp — naive wall-clock, fixed width:
         LogicalType::Timestamp{precision} =>{
-            // Render the FULL stored value as text, UTC, always 6 fractional digits.
-            // AT TIME ZONE 'UTC' on a timestamptz converts to UTC and yields a plain
-            // timestamp — correct. (On a NAIVE timestamp it *interprets* as UTC and
-            // yields timestamptz — wrong direction. Naive columns are a separate branch
-            // gated on --assume-tz; this arm assumes tz-aware. See note below.)
+            // Render the stored value as text exactly as-is, always 6 fractional
+            // digits. No tz conversion: these are NAIVE timestamps (no zone), so
+            // the wall-clock IS the canonical value — comparing it byte-for-byte is
+            // deterministic and engine-independent. (Applying AT TIME ZONE 'UTC'
+            // here would interpret the naive value as UTC and yield a timestamptz,
+            // which each engine then re-localizes differently — a conformance
+            // hazard. UTC-normalizing genuinely tz-aware columns is a separate
+            // branch, gated on --assume-tz.)
             let rendered = format!(
-                "TO_CHAR({} AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US')",
+                "TO_CHAR({}, 'YYYY-MM-DD HH24:MI:SS.US')",
                 col.name
             );
 
@@ -60,21 +66,14 @@ fn canonical_expr(col: &ColumnSchema) -> Result<String> {
             // slicing is the ONE reduction guaranteed bit-identical on every engine —
             // which is the entire job of canonicalization. The full render is fixed
             // layout: 19 chars "YYYY-MM-DD HH24:MI:SS" + '.' + 6 digits = 26 total.
-            //   p == 6 → keep all 26
-            //   p in 1..=5 → keep 19 + 1 (dot) + p = 20 + p
-            //   p == 0 → drop the dot too, keep 19
-            match p {
+            //   precision == 6 → keep all 26
+            //   precision in 1..=5 → keep 19 + 1 (dot) + precision = 20 + precision
+            //   precision == 0 → drop the dot too, keep 19
+            match precision {
                 6 => rendered,
                 0 => format!("LEFT({}, 19)", rendered),
-                _ => format!("LEFT({}, {})", rendered, 20 + p),
+                _ => format!("LEFT({}, {})", rendered, 20 + precision),
             }
-        }
-        
-        _ => {
-            return Err(error::VeritableError::Schema(format!(
-                "no canonical expression for type {:?} (not yet conformance-tested)",
-                col.ty
-            )))
         }
     };
     Ok(wrap(col, payload))
@@ -126,8 +125,8 @@ impl Dialect for PgDialect {
         Ok(format!(
             "SELECT \
                COUNT(*) AS cnt, \
-               COALESCE(SUM({h1}), 0) % {m} AS sum_h1, \
-               COALESCE(SUM({h2}), 0) % {m} AS sum_h2 \
+               CAST(COALESCE(SUM({h1}), 0) % {m} AS TEXT) AS sum_h1, \
+               CAST(COALESCE(SUM({h2}), 0) % {m} AS TEXT) AS sum_h2 \
              FROM {from}",
             h1 = half_unsigned(1),
             h2 = half_unsigned(17),
@@ -137,30 +136,32 @@ impl Dialect for PgDialect {
 
 
     // joindiff: full outer join
-    fn joindiff_sql(&self, a: &TableRef, b: &TableRef, plan: &ComparePlan) -> Result<String>;
+    fn joindiff_sql(&self, _a: &TableRef, _b: &TableRef, _plan: &ComparePlan) -> Result<String> {
+        todo!()
+    }
 
     // hashdiff: normalization matrix - One column -> canonical SQL expression
-    fn normalize_column(&self, col: &ColumnSchema) -> Result<String>{
+    fn normalize_column(&self, _col: &ColumnSchema) -> Result<String>{
         todo!()
     }
 
     // hashdiff: per-row digest from canonical expressions -> md5 -> two u64 halves
-    fn digest_expr(&self, canon_cols: &[String]) -> Result<String> {
+    fn digest_expr(&self, _canon_cols: &[String]) -> Result<String> {
         todo!()
     }
     
     // hashdiff: bound the keyspace
-    fn keyspace_bounds_sql(&self, table: &TableRef, key: &ColumnSchema) -> Result<String> {
+    fn keyspace_bounds_sql(&self, _table: &TableRef, _key: &ColumnSchema) -> Result<String> {
         todo!()
     }
 
     // hashdiff: one segment's checksum tuple, server-side execution
-    fn segment_checksum_sql(&self, table: &TableRef, plan: &ComparePlan, segment: &Segment) -> Result<String> {
+    fn segment_checksum_sql(&self, _table: &TableRef, _plan: &ComparePlan, _segment: &Segment) -> Result<String> {
         todo!()
     }
 
     // hashdiff: leaf rows for a narrowed, still-disagreeing segment
-    fn segment_rows_sql(&self, table: &TableRef, plan: &ComparePlan) -> Result<String> {
+    fn segment_rows_sql(&self, _table: &TableRef, _plan: &ComparePlan) -> Result<String> {
         todo!()
     }
 }

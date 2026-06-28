@@ -12,4 +12,3 @@ vrtb-core = { path = "../vrtb-core" }
 vrtb-pg = { path = "../vrtb-pg" }
 vrtb-duck = { path = "../vrtb-duck" }
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }

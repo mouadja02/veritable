@@ -654,12 +654,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
 name = "duckdb"
 version = "1.10504.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2043,16 +2037,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "signal-hook-registry"
-version = "1.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
-dependencies = [
- "errno",
- "libc",
-]
-
-[[package]]
 name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2264,9 +2248,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -2534,7 +2516,6 @@ name = "vrtb-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "tokio",
  "vrtb-core",
  "vrtb-duck",
  "vrtb-pg",
@@ -2544,7 +2525,6 @@ dependencies = [
 name = "vrtb-core"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "thiserror",
 ]
 
@@ -2552,7 +2532,6 @@ dependencies = [
 name = "vrtb-duck"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "duckdb",
  "vrtb-core",
 ]
@@ -2561,8 +2540,6 @@ dependencies = [
 name = "vrtb-pg"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "dotenvy",
  "tokio",
  "tokio-postgres",
  "vrtb-core",

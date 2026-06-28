@@ -1,3 +1,4 @@
+pub mod conformance;
 pub mod engine;
 pub mod error;
 
@@ -34,10 +35,24 @@ pub fn build_plan(src: &TableSchema, dst: &TableSchema, cols: Option<&[String]>,
     })
 }
 
-pub fn joindiff(engine: &dyn Engine, a: &TableRef, b: &TableRef, plan: &ComparePlan) -> Result<Vec<DiffRow>> {
+// Not yet implemented — see docs/STATUS.md §5. Signatures are the intended API.
+pub fn joindiff(
+    _engine: &dyn Engine,
+    _a: &TableRef,
+    _b: &TableRef,
+    _plan: &ComparePlan,
+) -> Result<Vec<DiffRow>> {
     todo!()
 }
 
-pub fn hashdiff(src: &dyn Engine, dst: &dyn Engine, src_t: &TableRef, dst_t: &TableRef, plan: &ComparePlan, segment_size: usize, leaf_threshold: usize) -> Result<Vec<DiffRow>> {
+pub fn hashdiff(
+    _src: &dyn Engine,
+    _dst: &dyn Engine,
+    _src_t: &TableRef,
+    _dst_t: &TableRef,
+    _plan: &ComparePlan,
+    _segment_size: usize,
+    _leaf_threshold: usize,
+) -> Result<Vec<DiffRow>> {
     todo!()
 }

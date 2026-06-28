@@ -9,8 +9,6 @@ postgres = ["dep:tokio-postgres", "dep:tokio"]
 
 [dependencies]
 vrtb-core = { path = "../vrtb-core" }
-async-trait = "0.1"
-dotenvy = "0.15"
 
 tokio-postgres = { version = "0.7", optional = true }
-tokio = { version = "1", features = ["rt", "macros"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "time", "macros"], optional = true }

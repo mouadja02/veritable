@@ -9,6 +9,5 @@ duckdb = ["dep:duckdb"]
 
 [dependencies]
 vrtb-core = { path = "../vrtb-core" }
-async-trait = "0.1"
 
 duckdb = { version = "1", features = ["bundled"], optional = true }

@@ -3,6 +3,6 @@ members = [
     "crates/vrtb-core",
     "crates/vrtb-cli",
     "crates/vrtb-pg",
-    "crates/vrtb-duck"
+    "crates/vrtb-duck",
 ]
 resolver = "2"

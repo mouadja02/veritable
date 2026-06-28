@@ -5,4 +5,3 @@ edition = "2024"
 
 [dependencies]
 thiserror = "2"
-async-trait = "0.1"

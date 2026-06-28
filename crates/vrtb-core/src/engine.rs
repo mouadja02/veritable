@@ -1,13 +1,11 @@
-use async_trait::async_trait;
-
 use crate::error::Result;
 
 pub struct TableRef {
-    schema: Option<String>,
-    name: String,
+    pub schema: Option<String>,
+    pub name: String,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LogicalType {
     Int,
     Decimal{scale:u8},
@@ -43,11 +41,16 @@ pub enum KeyValue {
     Bytes(Vec<u8>)
 }   // int or UUID-as-bytes
 
+// Segment / Checksum / DiffRow are forward-declared scaffolding for the
+// not-yet-implemented hashdiff/joindiff paths (docs/STATUS.md §5); their fields
+// aren't read yet.
+#[allow(dead_code)]
 pub struct Segment {
     lo: KeyValue,
     hi: KeyValue,
 } // half-open [lo, hi)
 
+#[allow(dead_code)]
 pub struct Checksum {
     half1: u64,
     half2: u64,
@@ -60,6 +63,7 @@ pub enum DiffOp {
     Differ,
 }  // Equivalent to classic diff '-', '+', '~'
 
+#[allow(dead_code)]
 pub struct DiffRow {
     op: DiffOp,
     key: KeyValue,

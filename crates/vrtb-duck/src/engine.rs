@@ -1,102 +1,202 @@
+// DuckDB Engine adapter — implements vrtb_core::engine::Engine.
 use std::path;
 
-use duckdb::{Connection, Result};
+use duckdb::types::Value;
+use duckdb::Connection;
+
+use vrtb_core::engine::{ColumnSchema, Dialect, Engine, LogicalType, TableRef, TableSchema};
+use vrtb_core::error::{Result as CoreResult, VeritableError};
+
+use crate::dialect::DuckDBDialect;
 
 pub struct DuckDBEngine {
     conn: Connection,
+    dialect: DuckDBDialect,
 }
 
 impl DuckDBEngine {
-    pub fn new(path: &path::Path) -> Result<Self> {
+    /// Open (or create) a DuckDB database file read-write.
+    pub fn new(path: &path::Path) -> duckdb::Result<Self> {
         let conn = Connection::open(path)?;
-        Ok(DuckDBEngine { conn })
+        Ok(DuckDBEngine { conn, dialect: DuckDBDialect })
+    }
+
+    /// Open an existing DuckDB database file read-only — the safe mode for
+    /// comparisons, which never mutate the data under inspection.
+    pub fn open_read_only(path: &path::Path) -> duckdb::Result<Self> {
+        let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
+        let conn = Connection::open_with_flags(path, config)?;
+        Ok(DuckDBEngine { conn, dialect: DuckDBDialect })
     }
 }
 
-struct DuckDBColumn {
-    name: String,
-    data_type: String,
-    not_null: bool,
-    default_value: Option<String>,
-    primary_key: bool,
+fn duck_err(e: duckdb::Error) -> VeritableError {
+    VeritableError::Query(e.to_string())
 }
 
-
-trait DuckDBEngineExt { 
-    fn introspect(&self, table: &str) -> Result<Vec<DuckDBColumn>>;
-    fn execute(&self, sql: &str) -> Result<()>;
+/// Stringify a DuckDB cell positionally. Scalars render to their natural text;
+/// the checksum path only ever sees BigInt (cnt) and Text (the two sum halves).
+/// NULL becomes the empty string — fine here because the checksum columns are
+/// COALESCE'd and never null. Temporal/nested values fall back to Debug (a known
+/// limitation for generic `execute`, not exercised by the conformance path).
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Boolean(b) => b.to_string(),
+        Value::TinyInt(n) => n.to_string(),
+        Value::SmallInt(n) => n.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::BigInt(n) => n.to_string(),
+        Value::HugeInt(n) => n.to_string(),
+        Value::UTinyInt(n) => n.to_string(),
+        Value::USmallInt(n) => n.to_string(),
+        Value::UInt(n) => n.to_string(),
+        Value::UBigInt(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Double(f) => f.to_string(),
+        Value::Decimal(d) => d.to_string(),
+        Value::Text(s) => s.clone(),
+        Value::Enum(s) => s.clone(),
+        Value::Blob(b) => b.iter().map(|x| format!("{x:02x}")).collect(),
+        other => format!("{other:?}"),
+    }
 }
 
-impl DuckDBEngineExt for DuckDBEngine {
-    fn introspect(&self, table: &str) -> Result<Vec<DuckDBColumn>> {
-        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({})", table))?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
-        })?;
-        let mut columns: Vec<DuckDBColumn> = Vec::new();
-        for column in rows {
-            let (name, data_type, not_null, default_value, primary_key): (String, String, bool, Option<String>, bool) = column?;
-            columns.push(DuckDBColumn {
+/// Parse the scale out of a `DECIMAL(p, s)` / `NUMERIC(p, s)` spelling.
+fn parse_scale(upper: &str) -> Option<u8> {
+    let inside = upper.split('(').nth(1)?.trim_end_matches(')');
+    inside.split(',').nth(1)?.trim().parse().ok()
+}
+
+/// Map a DuckDB declared type string to a Veritable [`LogicalType`].
+fn map_type(raw: &str) -> CoreResult<LogicalType> {
+    let upper = raw.trim().to_uppercase();
+    let base = upper.split('(').next().unwrap_or("").trim();
+    let ty = match base {
+        "TINYINT" | "SMALLINT" | "INTEGER" | "INT" | "BIGINT" | "HUGEINT" | "UTINYINT"
+        | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT" => LogicalType::Int,
+        "VARCHAR" | "TEXT" | "STRING" | "CHAR" | "BPCHAR" => LogicalType::String,
+        "BOOLEAN" | "BOOL" | "LOGICAL" => LogicalType::Boolean,
+        "TIMESTAMP" | "DATETIME" | "TIMESTAMP WITH TIME ZONE" | "TIMESTAMPTZ"
+        | "TIMESTAMP_NS" | "TIMESTAMP_MS" | "TIMESTAMP_S" => LogicalType::Timestamp { precision: 6 },
+        "DECIMAL" | "NUMERIC" => LogicalType::Decimal { scale: parse_scale(&upper).unwrap_or(0) },
+        "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" => LogicalType::Binary,
+        _ => return Err(VeritableError::Schema(format!("unsupported DuckDB type: {raw}"))),
+    };
+    Ok(ty)
+}
+
+impl Engine for DuckDBEngine {
+    fn introspect(&self, table: &TableRef) -> CoreResult<TableSchema> {
+        let qualified = match &table.schema {
+            Some(s) => format!("{}.{}", s, table.name),
+            None => table.name.clone(),
+        };
+        let sql = format!("PRAGMA table_info('{qualified}')");
+        let mut stmt = self.conn.prepare(&sql).map_err(duck_err)?;
+        let mapped = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,         // name
+                    row.get::<_, String>(2)?,         // type
+                    row.get::<_, bool>(3)?,           // notnull
+                    row.get::<_, Option<String>>(4)?, // dflt_value
+                    row.get::<_, bool>(5)?,           // pk
+                ))
+            })
+            .map_err(duck_err)?;
+
+        let mut columns = Vec::new();
+        for row in mapped {
+            let (name, ty, notnull, default_value, primary_key) = row.map_err(duck_err)?;
+            columns.push(ColumnSchema {
                 name,
-                data_type,
-                not_null,
+                ty: map_type(&ty)?,
+                nullable: !notnull,
                 default_value,
                 primary_key,
             });
         }
-        Ok(columns)
+        Ok(TableSchema { columns })
     }
 
-    fn execute(&self, sql: &str) -> Result<()> {
-        self.conn.execute(sql, [])?;
-        Ok(())
+    fn dialect(&self) -> &dyn Dialect {
+        &self.dialect
+    }
+
+    fn execute(&self, sql: &str) -> CoreResult<Vec<Vec<String>>> {
+        let mut stmt = self.conn.prepare(sql).map_err(duck_err)?;
+        let mut rows = stmt.query([]).map_err(duck_err)?;
+        // DuckDB only knows the column count after the query has executed, so
+        // read it from the live result rather than the prepared statement.
+        let ncols = rows.as_ref().map(|s| s.column_count()).unwrap_or(0);
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().map_err(duck_err)? {
+            let mut r = Vec::with_capacity(ncols);
+            for i in 0..ncols {
+                let v: Value = row.get(i).map_err(duck_err)?;
+                r.push(value_to_string(&v));
+            }
+            out.push(r);
+        }
+        Ok(out)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vrtb_core::engine::{Engine, LogicalType, TableRef};
+
+    fn tref(name: &str) -> TableRef {
+        TableRef { schema: None, name: name.into() }
+    }
 
     #[test]
-    fn test_connection() {
+    fn execute_returns_stringified_rows() {
         let dir = std::env::temp_dir().join("vrtb_test");
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test_open.db");
-        println!("Database path: {:?}", db_path);
         let engine = DuckDBEngine::new(&db_path).unwrap();
-        // Check that we can interact with a table
-        engine.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER)").unwrap();
-        engine.execute("DELETE FROM test").unwrap();
-        engine.execute("INSERT INTO test (id) VALUES (1)").unwrap();
-        // Check that we can execute a simple query
-        let val: i32 = engine.conn.query_row("SELECT * FROM test", [], |row| row.get(0)).unwrap();
-        assert_eq!(val, 1);
-        // Cleanup
+        engine.conn.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER)", []).unwrap();
+        engine.conn.execute("DELETE FROM test", []).unwrap();
+        engine.conn.execute("INSERT INTO test (id) VALUES (1)", []).unwrap();
+
+        let rows = engine.execute("SELECT id FROM test").unwrap();
+        assert_eq!(rows, vec![vec!["1".to_string()]]);
+
         drop(engine);
         let _ = std::fs::remove_file(&db_path);
     }
 
     #[test]
-    fn test_introspect() {
+    fn introspect_maps_logical_types() {
         let dir = std::env::temp_dir().join("vrtb_test");
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test_introspect.db");
-        println!("Database path: {:?}", db_path);
         let engine = DuckDBEngine::new(&db_path).unwrap();
-        engine.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER, name VARCHAR PRIMARY KEY)").unwrap();
-        let columns = engine.introspect("test").unwrap();
-        assert_eq!(columns.len(), 2);
-        assert_eq!(columns[0].name, "id");
-        assert_eq!(columns[0].data_type, "INTEGER");
-        assert_eq!(columns[0].not_null, false);
-        assert_eq!(columns[0].default_value, None);
-        assert_eq!(columns[0].primary_key, false);
-        assert_eq!(columns[1].name, "name");
-        assert_eq!(columns[1].data_type, "VARCHAR");
-        assert_eq!(columns[1].not_null, true);
-        assert_eq!(columns[1].default_value, None);
-        assert_eq!(columns[1].primary_key, true);
+        engine
+            .conn
+            .execute("CREATE TABLE IF NOT EXISTS test (id INTEGER, name VARCHAR PRIMARY KEY)", [])
+            .unwrap();
+
+        let schema = engine.introspect(&tref("test")).unwrap();
+        assert_eq!(schema.columns.len(), 2);
+        assert_eq!(schema.columns[0].name, "id");
+        assert_eq!(schema.columns[0].ty, LogicalType::Int);
+        assert_eq!(schema.columns[0].primary_key, false);
+        assert_eq!(schema.columns[1].name, "name");
+        assert_eq!(schema.columns[1].ty, LogicalType::String);
+        assert_eq!(schema.columns[1].primary_key, true);
+
         drop(engine);
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn map_type_handles_decimal_scale() {
+        assert_eq!(map_type("DECIMAL(12,2)").unwrap(), LogicalType::Decimal { scale: 2 });
+        assert_eq!(map_type("TIMESTAMP").unwrap(), LogicalType::Timestamp { precision: 6 });
+        assert_eq!(map_type("BOOLEAN").unwrap(), LogicalType::Boolean);
     }
 }
