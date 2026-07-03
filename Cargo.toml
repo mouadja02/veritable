@@ -4,5 +4,6 @@ members = [
     "crates/vrtb-cli",
     "crates/vrtb-pg",
     "crates/vrtb-duck",
+    "crates/vrtb-utils"
 ]
 resolver = "2"

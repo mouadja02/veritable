@@ -1,12 +1,18 @@
 pub mod conformance;
 pub mod engine;
 pub mod error;
+pub mod format;
 
-use engine::{ColumnSchema, TableSchema, TableRef, ComparePlan, DiffRow, Engine};
+use engine::{ColumnSchema, ComparePlan, DiffRow, Engine, TableRef, TableSchema};
 use error::Result;
 
 // Resolve shared columns, fail on incomparable types
-pub fn build_plan(src: &TableSchema, dst: &TableSchema, cols: Option<&[String]>, key: &str) -> Result<ComparePlan> {
+pub fn build_plan(
+    src: &TableSchema,
+    dst: &TableSchema,
+    cols: Option<&[String]>,
+    key: &str,
+) -> Result<ComparePlan> {
     let shared_columns = match cols {
         Some(cols) => {
             let mut shared: Vec<ColumnSchema> = Vec::new();
@@ -16,23 +22,53 @@ pub fn build_plan(src: &TableSchema, dst: &TableSchema, cols: Option<&[String]>,
                 match (src_col, dst_col) {
                     (Some(src_col), Some(dst_col)) => {
                         if src_col.ty != dst_col.ty {
-                            return Err(error::VeritableError::Schema(format!("Column {} has different types in source and destination", col)));
+                            return Err(error::VeritableError::Schema(format!(
+                                "Column {} has different types in source and destination",
+                                col
+                            )));
                         }
                         shared.push(src_col.clone());
-                    },
-                    _ => return Err(error::VeritableError::Schema(format!("Column {} not found in both source and destination", col))),
+                    }
+                    _ => {
+                        return Err(error::VeritableError::Schema(format!(
+                            "Column {} not found in both source and destination",
+                            col
+                        )));
+                    }
                 }
             }
             shared
-        },
+        }
         None => Vec::new(),
     };
     // Find the key column
-    let key_column: &ColumnSchema = src.columns.iter().find(|c| c.name == key).ok_or_else(|| error::VeritableError::Schema(format!("Key column {} not found in source", key)))?;
+    let key_column: &ColumnSchema =
+        src.columns.iter().find(|c| c.name == key).ok_or_else(|| {
+            error::VeritableError::Schema(format!("Key column {} not found in source", key))
+        })?;
     Ok(ComparePlan {
         key: key_column.clone(),
         columns: shared_columns,
     })
+}
+
+// Introspect both sides and plan the key plus every shared non-key column.
+pub fn plan(
+    src: &dyn Engine,
+    src_t: &TableRef,
+    dst: &dyn Engine,
+    dst_t: &TableRef,
+    key: &str,
+) -> ComparePlan {
+    let src_schema = src.introspect(src_t).unwrap();
+    let dst_schema = dst.introspect(dst_t).unwrap();
+    let cols: Vec<String> = src_schema
+        .columns
+        .iter()
+        .filter(|c| c.name != key)
+        .map(|c| c.name.clone())
+        .collect();
+    build_plan(&src_schema, &dst_schema, Some(&cols), key).unwrap()
 }
 
 // Not yet implemented — see docs/STATUS.md §5. Signatures are the intended API.

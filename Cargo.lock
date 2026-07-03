@@ -654,6 +654,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenv"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
+
+[[package]]
 name = "duckdb"
 version = "1.10504.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1296,6 +1302,15 @@ name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
+
+[[package]]
+name = "load-dotenv"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71abcf6d8da2a6c163554a61cdbca2438bbe9e687a9c5ebeee12e9af42864b54"
+dependencies = [
+ "dotenv",
+]
 
 [[package]]
 name = "lock_api"
@@ -2516,6 +2531,7 @@ name = "vrtb-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "load-dotenv",
  "vrtb-core",
  "vrtb-duck",
  "vrtb-pg",
@@ -2525,6 +2541,7 @@ dependencies = [
 name = "vrtb-core"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "thiserror",
 ]
 
@@ -2534,6 +2551,7 @@ version = "0.1.0"
 dependencies = [
  "duckdb",
  "vrtb-core",
+ "vrtb-utils",
 ]
 
 [[package]]
@@ -2542,6 +2560,14 @@ version = "0.1.0"
 dependencies = [
  "tokio",
  "tokio-postgres",
+ "vrtb-core",
+ "vrtb-utils",
+]
+
+[[package]]
+name = "vrtb-utils"
+version = "0.1.0"
+dependencies = [
  "vrtb-core",
 ]
 

@@ -1,8 +1,8 @@
 // DuckDB Engine adapter — implements vrtb_core::engine::Engine.
 use std::path;
 
-use duckdb::types::Value;
 use duckdb::Connection;
+use duckdb::types::Value;
 
 use vrtb_core::engine::{ColumnSchema, Dialect, Engine, LogicalType, TableRef, TableSchema};
 use vrtb_core::error::{Result as CoreResult, VeritableError};
@@ -15,18 +15,24 @@ pub struct DuckDBEngine {
 }
 
 impl DuckDBEngine {
-    /// Open (or create) a DuckDB database file read-write.
+    // Open (or create) a DuckDB database file read-write.
     pub fn new(path: &path::Path) -> duckdb::Result<Self> {
         let conn = Connection::open(path)?;
-        Ok(DuckDBEngine { conn, dialect: DuckDBDialect })
+        Ok(DuckDBEngine {
+            conn,
+            dialect: DuckDBDialect,
+        })
     }
 
-    /// Open an existing DuckDB database file read-only — the safe mode for
-    /// comparisons, which never mutate the data under inspection.
+    // Open an existing DuckDB database file read-only — the safe mode for
+    // comparisons, which never mutate the data under inspection.
     pub fn open_read_only(path: &path::Path) -> duckdb::Result<Self> {
         let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
         let conn = Connection::open_with_flags(path, config)?;
-        Ok(DuckDBEngine { conn, dialect: DuckDBDialect })
+        Ok(DuckDBEngine {
+            conn,
+            dialect: DuckDBDialect,
+        })
     }
 }
 
@@ -34,11 +40,11 @@ fn duck_err(e: duckdb::Error) -> VeritableError {
     VeritableError::Query(e.to_string())
 }
 
-/// Stringify a DuckDB cell positionally. Scalars render to their natural text;
-/// the checksum path only ever sees BigInt (cnt) and Text (the two sum halves).
-/// NULL becomes the empty string — fine here because the checksum columns are
-/// COALESCE'd and never null. Temporal/nested values fall back to Debug (a known
-/// limitation for generic `execute`, not exercised by the conformance path).
+// Stringify a DuckDB cell positionally. Scalars render to their natural text;
+// the checksum path only ever sees BigInt (cnt) and Text (the two sum halves).
+// NULL becomes the empty string — fine here because the checksum columns are
+// COALESCE'd and never null. Temporal/nested values fall back to Debug (a known
+// limitation for generic `execute`, not exercised by the conformance path).
 fn value_to_string(v: &Value) -> String {
     match v {
         Value::Null => String::new(),
@@ -62,13 +68,13 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
-/// Parse the scale out of a `DECIMAL(p, s)` / `NUMERIC(p, s)` spelling.
+// Parse the scale out of a `DECIMAL(p, s)` / `NUMERIC(p, s)` spelling.
 fn parse_scale(upper: &str) -> Option<u8> {
     let inside = upper.split('(').nth(1)?.trim_end_matches(')');
     inside.split(',').nth(1)?.trim().parse().ok()
 }
 
-/// Map a DuckDB declared type string to a Veritable [`LogicalType`].
+// Map a DuckDB declared type string to a Veritable [`LogicalType`].
 fn map_type(raw: &str) -> CoreResult<LogicalType> {
     let upper = raw.trim().to_uppercase();
     let base = upper.split('(').next().unwrap_or("").trim();
@@ -77,16 +83,31 @@ fn map_type(raw: &str) -> CoreResult<LogicalType> {
         | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT" => LogicalType::Int,
         "VARCHAR" | "TEXT" | "STRING" | "CHAR" | "BPCHAR" => LogicalType::String,
         "BOOLEAN" | "BOOL" | "LOGICAL" => LogicalType::Boolean,
-        "TIMESTAMP" | "DATETIME" | "TIMESTAMP WITH TIME ZONE" | "TIMESTAMPTZ"
-        | "TIMESTAMP_NS" | "TIMESTAMP_MS" | "TIMESTAMP_S" => LogicalType::Timestamp { precision: 6 },
-        "DECIMAL" | "NUMERIC" => LogicalType::Decimal { scale: parse_scale(&upper).unwrap_or(0) },
+        "TIMESTAMP"
+        | "DATETIME"
+        | "TIMESTAMP WITH TIME ZONE"
+        | "TIMESTAMPTZ"
+        | "TIMESTAMP_NS"
+        | "TIMESTAMP_MS"
+        | "TIMESTAMP_S" => LogicalType::Timestamp { precision: 6 },
+        "DECIMAL" | "NUMERIC" => LogicalType::Decimal {
+            scale: parse_scale(&upper).unwrap_or(0),
+        },
         "BLOB" | "BYTEA" | "BINARY" | "VARBINARY" => LogicalType::Binary,
-        _ => return Err(VeritableError::Schema(format!("unsupported DuckDB type: {raw}"))),
+        _ => {
+            return Err(VeritableError::Schema(format!(
+                "unsupported DuckDB type: {raw}"
+            )));
+        }
     };
     Ok(ty)
 }
 
 impl Engine for DuckDBEngine {
+    fn name(&self) -> &str {
+        "DuckDB"
+    }
+
     fn introspect(&self, table: &TableRef) -> CoreResult<TableSchema> {
         let qualified = match &table.schema {
             Some(s) => format!("{}.{}", s, table.name),
@@ -149,7 +170,10 @@ mod tests {
     use vrtb_core::engine::{Engine, LogicalType, TableRef};
 
     fn tref(name: &str) -> TableRef {
-        TableRef { schema: None, name: name.into() }
+        TableRef {
+            schema: None,
+            name: name.into(),
+        }
     }
 
     #[test]
@@ -158,9 +182,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("test_open.db");
         let engine = DuckDBEngine::new(&db_path).unwrap();
-        engine.conn.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER)", []).unwrap();
+        engine
+            .conn
+            .execute("CREATE TABLE IF NOT EXISTS test (id INTEGER)", [])
+            .unwrap();
         engine.conn.execute("DELETE FROM test", []).unwrap();
-        engine.conn.execute("INSERT INTO test (id) VALUES (1)", []).unwrap();
+        engine
+            .conn
+            .execute("INSERT INTO test (id) VALUES (1)", [])
+            .unwrap();
 
         let rows = engine.execute("SELECT id FROM test").unwrap();
         assert_eq!(rows, vec![vec!["1".to_string()]]);
@@ -177,7 +207,10 @@ mod tests {
         let engine = DuckDBEngine::new(&db_path).unwrap();
         engine
             .conn
-            .execute("CREATE TABLE IF NOT EXISTS test (id INTEGER, name VARCHAR PRIMARY KEY)", [])
+            .execute(
+                "CREATE TABLE IF NOT EXISTS test (id INTEGER, name VARCHAR PRIMARY KEY)",
+                [],
+            )
             .unwrap();
 
         let schema = engine.introspect(&tref("test")).unwrap();
@@ -195,8 +228,14 @@ mod tests {
 
     #[test]
     fn map_type_handles_decimal_scale() {
-        assert_eq!(map_type("DECIMAL(12,2)").unwrap(), LogicalType::Decimal { scale: 2 });
-        assert_eq!(map_type("TIMESTAMP").unwrap(), LogicalType::Timestamp { precision: 6 });
+        assert_eq!(
+            map_type("DECIMAL(12,2)").unwrap(),
+            LogicalType::Decimal { scale: 2 }
+        );
+        assert_eq!(
+            map_type("TIMESTAMP").unwrap(),
+            LogicalType::Timestamp { precision: 6 }
+        );
         assert_eq!(map_type("BOOLEAN").unwrap(), LogicalType::Boolean);
     }
 }

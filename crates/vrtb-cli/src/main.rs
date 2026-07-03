@@ -4,7 +4,7 @@ pub mod spec;
 use clap::{Parser, Subcommand};
 
 use vrtb_core::build_plan;
-use vrtb_core::conformance::{conformance_check, Verdict};
+use vrtb_core::conformance::{Verdict, conformance_check};
 use vrtb_core::error::{Result, VeritableError};
 
 use format::Format;
@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Row-level diff (not yet implemented).
+    // Row-level diff (not yet implemented).
     Diff {
         #[arg(short, long)]
         src: String,
@@ -37,7 +37,7 @@ enum Commands {
         format: Format,
     },
 
-    /// Whole-table checksum + count comparison of two tables.
+    // Whole-table checksum + count comparison of two tables.
     Check {
         #[arg(short, long)]
         src: String,
@@ -51,7 +51,7 @@ enum Commands {
         format: Format,
     },
 
-    /// Alias of `check`, framed as a cross-engine conformance assertion.
+    // Alias of `check`, framed as a cross-engine conformance assertion.
     Conformance {
         #[arg(short, long)]
         src: String,
@@ -79,18 +79,28 @@ fn main() -> std::process::ExitCode {
 
 fn run(cli: Cli) -> Result<i32> {
     match cli.command {
-        Commands::Check { src, dst, key, columns, format }
-        | Commands::Conformance { src, dst, key, columns, format } => {
-            run_checksum(&src, &dst, &key, columns.as_deref(), format)
+        Commands::Check {
+            src,
+            dst,
+            key,
+            columns,
+            format,
         }
+        | Commands::Conformance {
+            src,
+            dst,
+            key,
+            columns,
+            format,
+        } => run_checksum(&src, &dst, &key, columns.as_deref(), format),
         Commands::Diff { .. } => Err(VeritableError::Engine(
             "diff is not implemented yet (joindiff/hashdiff are stubs)".into(),
         )),
     }
 }
 
-/// Build both engines, introspect, plan the shared columns, run the whole-table
-/// checksum comparison, and emit the verdict. Exit code: 0 = match, 1 = differ.
+// Build both engines, introspect, plan the shared columns, run the whole-table
+// checksum comparison, and emit the verdict. Exit code: 0 = match, 1 = differ.
 fn run_checksum(
     src: &str,
     dst: &str,
@@ -114,6 +124,7 @@ fn run_checksum(
         dst_engine.as_ref(),
         &dst_target.table,
         &plan,
+        format,
     )?;
 
     emit(&verdict, format);
@@ -126,11 +137,24 @@ fn emit(verdict: &Verdict, format: Format) {
             Verdict::Match => println!("MATCH — count and checksum agree on both sides"),
             Verdict::Differ { src, dst } => {
                 println!("DIFFER");
-                println!("  src: count={} h1={} h2={}", src.count, src.sum_h1, src.sum_h2);
-                println!("  dst: count={} h1={} h2={}", dst.count, dst.sum_h1, dst.sum_h2);
+                println!(
+                    "  src: count={} h1={} h2={}",
+                    src.count, src.sum_h1, src.sum_h2
+                );
+                println!(
+                    "  dst: count={} h1={} h2={}",
+                    dst.count, dst.sum_h1, dst.sum_h2
+                );
             }
         },
-        Format::Summary => println!("{}", if verdict.is_match() { "match" } else { "differ" }),
+        Format::Summary => println!(
+            "{}",
+            if verdict.is_match() {
+                "match"
+            } else {
+                "differ"
+            }
+        ),
         Format::Json | Format::Jsonl => println!("{}", verdict_json(verdict)),
     }
 }

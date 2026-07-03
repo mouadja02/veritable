@@ -16,6 +16,7 @@ use vrtb_core::error::{Result, VeritableError};
 use vrtb_duck::engine::DuckDBEngine;
 use vrtb_pg::engine::PostgresEngine;
 
+#[derive(Debug)]
 pub enum EngineSpec {
     Postgres(String),
     DuckDb(PathBuf),
@@ -27,18 +28,22 @@ pub struct Target {
 }
 
 pub fn parse_target(raw: &str) -> Result<Target> {
-    let (conn, table_str) = raw.rsplit_once('#').ok_or_else(|| {
-        VeritableError::Config(format!("target {raw:?} is missing '#<table>'"))
-    })?;
+    let (conn, table_str) = raw
+        .rsplit_once('#')
+        .ok_or_else(|| VeritableError::Config(format!("target {raw:?} is missing '#<table>'")))?;
     if table_str.is_empty() {
-        return Err(VeritableError::Config(format!("target {raw:?} has an empty table")));
+        return Err(VeritableError::Config(format!(
+            "target {raw:?} has an empty table"
+        )));
     }
 
     let spec = if conn.starts_with("postgres://") || conn.starts_with("postgresql://") {
         EngineSpec::Postgres(conn.to_string())
     } else if let Some(path) = conn.strip_prefix("duckdb:") {
         if path.is_empty() {
-            return Err(VeritableError::Config(format!("target {raw:?} has an empty duckdb path")));
+            return Err(VeritableError::Config(format!(
+                "target {raw:?} has an empty duckdb path"
+            )));
         }
         EngineSpec::DuckDb(PathBuf::from(path))
     } else {
@@ -47,22 +52,34 @@ pub fn parse_target(raw: &str) -> Result<Target> {
         )));
     };
 
-    Ok(Target { spec, table: parse_table(table_str) })
+    Ok(Target {
+        spec,
+        table: parse_table(table_str),
+    })
 }
 
 fn parse_table(s: &str) -> TableRef {
     match s.split_once('.') {
-        Some((schema, name)) => TableRef { schema: Some(schema.into()), name: name.into() },
-        None => TableRef { schema: None, name: s.into() },
+        Some((schema, name)) => TableRef {
+            schema: Some(schema.into()),
+            name: name.into(),
+        },
+        None => TableRef {
+            schema: None,
+            name: s.into(),
+        },
     }
 }
 
 pub fn build_engine(spec: &EngineSpec) -> Result<Box<dyn Engine>> {
     match spec {
-        EngineSpec::Postgres(dsn) => Ok(Box::new(PostgresEngine::connect(dsn)?)),
+        EngineSpec::Postgres(dsn) => {
+            let engine = PostgresEngine::connect(dsn)?;
+            Ok(Box::new(engine))
+        }
         EngineSpec::DuckDb(path) => {
             let engine = DuckDBEngine::open_read_only(path)
-                .map_err(|e| VeritableError::Connectivity(e.to_string()))?;
+                .map_err(|e| VeritableError::Config(e.to_string()))?;
             Ok(Box::new(engine))
         }
     }
