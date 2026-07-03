@@ -63,7 +63,7 @@ cargo run -p vrtb-cli         # runs the veritable binary
 
 DuckDB is embedded (via the `duckdb` crate), no container needed — the file lives at `data/duckdb/veritable.duckdb`.
 
-## 7. Normalization — the hard part
+## 7. Normalization — the hard part (must be reliable !)
 
 Cross-engine checksums only work if both engines render every value into an identical canonical text string in SQL. Each dialect has its own `canonical_expr()` that maps a column type to a VARCHAR-producing SQL expression. The universal wrapper `CASE WHEN col IS NULL THEN 'n' ELSE 'v' || <canonical> END` avoids NULL/sentinel collisions by construction.
 
