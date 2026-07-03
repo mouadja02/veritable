@@ -1,20 +1,12 @@
-use vrtb_core::engine::{ColumnSchema, LogicalType, TableRef, ComparePlan, Segment, Dialect};
+use vrtb_core::engine::{
+    ColumnSchema, ComparePlan, Dialect, JoinDiffQuery, LogicalType, Segment, TableRef,
+};
 use vrtb_core::error::Result;
-
+use vrtb_utils::sql::{aliased_key, from_table, mimatch_condition, wrap};
 pub struct PgDialect;
 
 // 2^64, as text, for the modular-sum arithmetic below. Postgres NUMERIC handles
 const TWO_POW_64: &str = "18446744073709551616";
-
-// Shared, engine-agnostic: the universal n/v wrapper.
-// NULL  -> 'n'      (presence is encoded in the very first byte)
-// value -> 'v' + payload
-// Every non-null starts with 'v', so no payload can ever be mistaken for the
-// NULL sentinel 'n' — not the empty string, not a literal "n". The wrapper is
-// identical for every type on every engine; only `payload` varies per cell.
-fn wrap(col: &ColumnSchema, payload: String) -> String {
-    format!("CASE WHEN {} IS NULL THEN 'n' ELSE 'v' || {} END", col.name, payload)
-}
 
 // postgres specific canonical expression for a column, or Err if the type is unsupported.
 fn canonical_expr(col: &ColumnSchema) -> Result<String> {
@@ -40,13 +32,14 @@ fn canonical_expr(col: &ColumnSchema) -> Result<String> {
 
         // Decimal — correct target form (fixed-point text at the *negotiated*
         // scale; trailing zeros preserved, e.g. 1.5 at scale 2 -> "1.50"):
-        LogicalType::Decimal{scale} => format!(" CAST({} AS NUMERIC(38, {}))::TEXT", col.name, scale),
+        LogicalType::Decimal { scale } => {
+            format!(" CAST({} AS NUMERIC(38, {}))::TEXT", col.name, scale)
+        }
         // Blocked on: `scale` must come from build_plan's negotiation, not
         // col.ty — two sides at scale 2 vs 4 is an error unless --coerce-scale.
-        
-        
+
         // Timestamp — naive wall-clock, fixed width:
-        LogicalType::Timestamp{precision} =>{
+        LogicalType::Timestamp { precision } => {
             // Render the stored value as text exactly as-is, always 6 fractional
             // digits. No tz conversion: these are NAIVE timestamps (no zone), so
             // the wall-clock IS the canonical value — comparing it byte-for-byte is
@@ -55,10 +48,7 @@ fn canonical_expr(col: &ColumnSchema) -> Result<String> {
             // which each engine then re-localizes differently — a conformance
             // hazard. UTC-normalizing genuinely tz-aware columns is a separate
             // branch, gated on --assume-tz.)
-            let rendered = format!(
-                "TO_CHAR({}, 'YYYY-MM-DD HH24:MI:SS.US')",
-                col.name
-            );
+            let rendered = format!("TO_CHAR({}, 'YYYY-MM-DD HH24:MI:SS.US')", col.name);
 
             // Reduce to precision p by TRUNCATING THE TEXT, not by casting the value.
             // Why text-slice and not CAST(... AS timestamp(p)): casting rounds, and
@@ -134,14 +124,49 @@ impl Dialect for PgDialect {
         ))
     }
 
-
     // joindiff: full outer join
-    fn joindiff_sql(&self, _a: &TableRef, _b: &TableRef, _plan: &ComparePlan) -> Result<String> {
-        todo!()
+    fn joindiff_sql(
+        &self,
+        a: &TableRef,
+        b: &TableRef,
+        plan: &ComparePlan,
+    ) -> Result<JoinDiffQuery> {
+        let join_key = plan.key.name.clone();
+        let left_only = format!(
+            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE b.{} IS NULL",
+            aliased_key("a", &plan.key),
+            from_table(a),
+            from_table(b),
+            join_key,
+            join_key
+        );
+        let right_only = format!(
+            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE a.{} IS NULL",
+            aliased_key("b", &plan.key),
+            from_table(a),
+            from_table(b),
+            join_key,
+            join_key
+        );
+        let differing = format!(
+            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE a.{} IS NOT NULL AND b.{} IS NOT NULL AND ({})",
+            aliased_key("a", &plan.key),
+            from_table(a),
+            from_table(b),
+            join_key,
+            join_key,
+            join_key,
+            mimatch_condition(plan)
+        );
+        Ok(JoinDiffQuery {
+            left_only,
+            right_only,
+            differing,
+        })
     }
 
     // hashdiff: normalization matrix - One column -> canonical SQL expression
-    fn normalize_column(&self, _col: &ColumnSchema) -> Result<String>{
+    fn normalize_column(&self, _col: &ColumnSchema) -> Result<String> {
         todo!()
     }
 
@@ -149,14 +174,19 @@ impl Dialect for PgDialect {
     fn digest_expr(&self, _canon_cols: &[String]) -> Result<String> {
         todo!()
     }
-    
+
     // hashdiff: bound the keyspace
     fn keyspace_bounds_sql(&self, _table: &TableRef, _key: &ColumnSchema) -> Result<String> {
         todo!()
     }
 
     // hashdiff: one segment's checksum tuple, server-side execution
-    fn segment_checksum_sql(&self, _table: &TableRef, _plan: &ComparePlan, _segment: &Segment) -> Result<String> {
+    fn segment_checksum_sql(
+        &self,
+        _table: &TableRef,
+        _plan: &ComparePlan,
+        _segment: &Segment,
+    ) -> Result<String> {
         todo!()
     }
 

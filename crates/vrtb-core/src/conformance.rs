@@ -8,12 +8,13 @@
 //! the adapter crates (`vrtb-pg`, `vrtb-duck`), and the live tests that exercise
 //! real databases live in the CLI crate.
 
-use crate::engine::{ComparePlan, Engine, TableRef};
+use crate::engine::{ComparePlan, Engine, JoinDiffQuery, TableRef};
 use crate::error::{Result, VeritableError};
+use crate::format::Format;
 
-/// The fast-exit precheck tuple: row count plus the two 64-bit checksum halves
-/// (kept as decimal strings — they are unsigned 64-bit values that may exceed
-/// `i64`, and the engines already hand them back as text).
+// The fast-exit precheck tuple: row count plus the two 64-bit checksum halves
+// (kept as decimal strings — they are unsigned 64-bit values that may exceed
+// `i64`, and the engines already hand them back as text).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChecksumResult {
     pub count: u64,
@@ -21,13 +22,13 @@ pub struct ChecksumResult {
     pub sum_h2: String,
 }
 
-/// Outcome of comparing two sides.
+// Outcome of comparing two sides.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// Counts and both checksum halves matched — the tables are equal under the
-    /// joindiff fast-exit precheck.
+    // Counts and both checksum halves matched — the tables are equal under the
+    // joindiff fast-exit precheck.
     Match,
-    /// At least one of count / h1 / h2 differed.
+    // At least one of count / h1 / h2 differed.
     Differ {
         src: ChecksumResult,
         dst: ChecksumResult,
@@ -40,8 +41,8 @@ impl Verdict {
     }
 }
 
-/// Build the dialect's whole-table checksum SQL, run it on `engine`, and parse
-/// the single `(cnt, sum_h1, sum_h2)` row it returns.
+// Build the dialect's whole-table checksum SQL, run it on `engine`, and parse
+// the single `(cnt, sum_h1, sum_h2)` row it returns.
 pub fn whole_table_checksum(
     engine: &dyn Engine,
     table: &TableRef,
@@ -52,29 +53,143 @@ pub fn whole_table_checksum(
     parse_checksum_row(rows)
 }
 
-/// Checksum both sides (which may be backed by different engines) and compare.
+// Render the three joindiff row groups in the requested format. Following the
+// classic diff convention (see `DiffOp`): `src_only` rows are left-only (`-`),
+// `dst_only` rows are right-only (`+`), and `differing` rows share a key but
+// disagree on non-key columns (`~`).
+fn output_diff(
+    src_only: Vec<Vec<String>>,
+    dst_only: Vec<Vec<String>>,
+    differing: Vec<Vec<String>>,
+    format: Format,
+) -> Result<()> {
+    match format {
+        Format::Human => {
+            println!("DIFFER — row-level differences");
+            println!(
+                "  {} only in src, {} only in dst, {} differing",
+                src_only.len(),
+                dst_only.len(),
+                differing.len()
+            );
+            for row in &src_only {
+                println!("  - {}", row.join(" | "));
+            }
+            for row in &dst_only {
+                println!("  + {}", row.join(" | "));
+            }
+            for row in &differing {
+                println!("  ~ {}", row.join(" | "));
+            }
+        }
+        Format::Summary => {
+            println!(
+                "differ: {} only in src, {} only in dst, {} differing",
+                src_only.len(),
+                dst_only.len(),
+                differing.len()
+            );
+        }
+        Format::Json => {
+            println!(
+                r#"{{"result":"differ","src_only":{},"dst_only":{},"differing":{}}}"#,
+                json_rows(&src_only),
+                json_rows(&dst_only),
+                json_rows(&differing)
+            );
+        }
+        Format::Jsonl => {
+            for (op, rows) in [
+                ("src_only", &src_only),
+                ("dst_only", &dst_only),
+                ("differing", &differing),
+            ] {
+                for row in rows {
+                    println!(r#"{{"op":"{}","row":{}}}"#, op, json_row(row));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// Minimal JSON rendering — core carries no serde dependency (see `verdict_json`
+// in the CLI, which hand-rolls output the same way).
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn json_row(row: &[String]) -> String {
+    let cells: Vec<String> = row
+        .iter()
+        .map(|c| format!("\"{}\"", json_escape(c)))
+        .collect();
+    format!("[{}]", cells.join(","))
+}
+
+fn json_rows(rows: &[Vec<String>]) -> String {
+    let items: Vec<String> = rows.iter().map(|r| json_row(r)).collect();
+    format!("[{}]", items.join(","))
+}
+
+// Checksum both sides (which may be backed by different engines) and compare.
 pub fn conformance_check(
     src: &dyn Engine,
     src_table: &TableRef,
     dst: &dyn Engine,
     dst_table: &TableRef,
     plan: &ComparePlan,
+    format: Format,
 ) -> Result<Verdict> {
     let s = whole_table_checksum(src, src_table, plan)?;
     let d = whole_table_checksum(dst, dst_table, plan)?;
     Ok(if s == d {
         Verdict::Match
     } else {
+        // Run the joindiff
+        // Check if engines are the same (join-diff is engine-specific)
+        if src.name() == dst.name() {
+            let sql: JoinDiffQuery = src.dialect().joindiff_sql(src_table, dst_table, plan)?;
+            let src_only_rows = src.execute(&sql.left_only)?;
+            let dst_only_rows = src.execute(&sql.right_only)?;
+            let diff_rows = src.execute(&sql.differing)?;
+            // Print the queries to the console for debugging purposes
+            println!("Left-only query: {}", sql.left_only);
+            println!("Right-only query: {}", sql.right_only);
+            println!("Differing query: {}", sql.differing);
+            output_diff(src_only_rows, dst_only_rows, diff_rows, format)?;
+        } else {
+            // Cross-engine conformance check: engines disagree on checksums
+            // but we cannot run a join-diff across engines. Just report the mismatch.
+            println!(
+                "Cross-engine conformance check: engines disagree on checksums, but cannot run join-diff across engines."
+            );
+            // We will sugguest runninh HashDiff for cross-engine conformance check
+            println!("Suggestion: Run HashDiff for cross-engine conformance check.");
+        }
         Verdict::Differ { src: s, dst: d }
     })
 }
 
-/// Pull the single checksum row out of an engine result set. The checksum SQL
-/// always selects exactly `cnt, sum_h1, sum_h2` in that order.
+// Pull the single checksum row out of an engine result set. The checksum SQL
+// always selects exactly `cnt, sum_h1, sum_h2` in that order.
 fn parse_checksum_row(rows: Vec<Vec<String>>) -> Result<ChecksumResult> {
-    let row = rows.into_iter().next().ok_or_else(|| {
-        VeritableError::Query("checksum query returned no rows".into())
-    })?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| VeritableError::Query("checksum query returned no rows".into()))?;
     if row.len() < 3 {
         return Err(VeritableError::Query(format!(
             "checksum query returned {} columns, expected 3 (cnt, sum_h1, sum_h2)",
@@ -94,9 +209,8 @@ fn parse_checksum_row(rows: Vec<Vec<String>>) -> Result<ChecksumResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{
-        ColumnSchema, Dialect, LogicalType, Segment, TableSchema,
-    };
+    use crate::engine::{ColumnSchema, Dialect, JoinDiffQuery, LogicalType, Segment, TableSchema};
+    use crate::format::Format;
 
     // A dialect whose checksum SQL is a sentinel string; the mock engine ignores
     // the SQL text and returns whatever rows it was seeded with.
@@ -105,8 +219,17 @@ mod tests {
         fn whole_table_checksum_sql(&self, t: &TableRef, _p: &ComparePlan) -> Result<String> {
             Ok(format!("CHECKSUM {}", t.name))
         }
-        fn joindiff_sql(&self, _a: &TableRef, _b: &TableRef, _p: &ComparePlan) -> Result<String> {
-            unimplemented!()
+        fn joindiff_sql(
+            &self,
+            _a: &TableRef,
+            _b: &TableRef,
+            _p: &ComparePlan,
+        ) -> Result<JoinDiffQuery> {
+            Ok(JoinDiffQuery {
+                left_only: "LEFT".into(),
+                right_only: "RIGHT".into(),
+                differing: "DIFF".into(),
+            })
         }
         fn normalize_column(&self, _c: &ColumnSchema) -> Result<String> {
             unimplemented!()
@@ -136,10 +259,16 @@ mod tests {
     }
     impl MockEngine {
         fn new(rows: Vec<Vec<String>>) -> Self {
-            MockEngine { dialect: MockDialect, rows }
+            MockEngine {
+                dialect: MockDialect,
+                rows,
+            }
         }
     }
     impl Engine for MockEngine {
+        fn name(&self) -> &str {
+            "mock"
+        }
         fn introspect(&self, _t: &TableRef) -> Result<TableSchema> {
             unimplemented!()
         }
@@ -169,7 +298,10 @@ mod tests {
     }
 
     fn tref(name: &str) -> TableRef {
-        TableRef { schema: None, name: name.into() }
+        TableRef {
+            schema: None,
+            name: name.into(),
+        }
     }
 
     #[test]
@@ -178,7 +310,11 @@ mod tests {
         let r = whole_table_checksum(&eng, &tref("t"), &plan()).unwrap();
         assert_eq!(
             r,
-            ChecksumResult { count: 10000, sum_h1: "123".into(), sum_h2: "456".into() }
+            ChecksumResult {
+                count: 10000,
+                sum_h1: "123".into(),
+                sum_h2: "456".into()
+            }
         );
     }
 
@@ -186,7 +322,8 @@ mod tests {
     fn identical_sides_match() {
         let a = MockEngine::new(vec![row("5", "aaa", "bbb")]);
         let b = MockEngine::new(vec![row("5", "aaa", "bbb")]);
-        let v = conformance_check(&a, &tref("t"), &b, &tref("t"), &plan()).unwrap();
+        let v =
+            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary).unwrap();
         assert!(v.is_match());
     }
 
@@ -194,7 +331,8 @@ mod tests {
     fn differing_checksum_differs() {
         let a = MockEngine::new(vec![row("5", "aaa", "bbb")]);
         let b = MockEngine::new(vec![row("5", "aaa", "ZZZ")]);
-        let v = conformance_check(&a, &tref("t"), &b, &tref("t"), &plan()).unwrap();
+        let v =
+            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary).unwrap();
         match v {
             Verdict::Differ { src, dst } => {
                 assert_eq!(src.sum_h2, "bbb");
@@ -208,7 +346,8 @@ mod tests {
     fn differing_count_differs() {
         let a = MockEngine::new(vec![row("5", "aaa", "bbb")]);
         let b = MockEngine::new(vec![row("6", "aaa", "bbb")]);
-        let v = conformance_check(&a, &tref("t"), &b, &tref("t"), &plan()).unwrap();
+        let v =
+            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary).unwrap();
         assert!(!v.is_match());
     }
 

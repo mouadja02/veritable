@@ -1,20 +1,13 @@
-use vrtb_core::engine::{ColumnSchema, LogicalType, TableRef, ComparePlan, Segment, Dialect};
+use vrtb_core::engine::{
+    ColumnSchema, ComparePlan, Dialect, JoinDiffQuery, LogicalType, Segment, TableRef,
+};
 use vrtb_core::error::Result;
+use vrtb_utils::sql::{aliased_key, from_table, mimatch_condition, wrap};
 
 pub struct DuckDBDialect;
 
 // 2^64, as text, for the modular-sum arithmetic below. DuckDB NUMERIC handles
 const TWO_POW_64: &str = "18446744073709551616";
-
-// Shared, engine-agnostic: the universal n/v wrapper.
-// NULL  -> 'n'      (presence is encoded in the very first byte)
-// value -> 'v' + payload
-// Every non-null starts with 'v', so no payload can ever be mistaken for the
-// NULL sentinel 'n' — not the empty string, not a literal "n". The wrapper is
-// identical for every type on every engine; only `payload` varies per cell.
-fn wrap(col: &ColumnSchema, payload: String) -> String {
-    format!("CASE WHEN {} IS NULL THEN 'n' ELSE 'v' || {} END", col.name, payload)
-}
 
 // DuckDB specific canonical expression for a column, or Err if the type is unsupported.
 fn canonical_expr(col: &ColumnSchema) -> Result<String> {
@@ -34,18 +27,19 @@ fn canonical_expr(col: &ColumnSchema) -> Result<String> {
         LogicalType::Boolean => format!("CASE WHEN {} THEN '1' ELSE '0' END", col.name),
 
         // Lowercase hex. DuckDB ENCODE(bytea,'hex') is uppercase, which is
-        // NOT the canonical form — so LOWER() is needed here. 
+        // NOT the canonical form — so LOWER() is needed here.
         LogicalType::Binary => format!("LOWER(ENCODE({}, 'hex'))", col.name),
 
         // Decimal — correct target form (fixed-point text at the *negotiated*
         // scale; trailing zeros preserved, e.g. 1.5 at scale 2 -> "1.50"):
-        LogicalType::Decimal{scale} => format!(" CAST({} AS NUMERIC(38, {}))::TEXT", col.name, scale),
+        LogicalType::Decimal { scale } => {
+            format!(" CAST({} AS NUMERIC(38, {}))::TEXT", col.name, scale)
+        }
         // Blocked on: `scale` must come from build_plan's negotiation, not
         // col.ty — two sides at scale 2 vs 4 is an error unless --coerce-scale.
-        
-        
+
         // Timestamp — naive wall-clock, fixed width:
-        LogicalType::Timestamp{precision} =>{
+        LogicalType::Timestamp { precision } => {
             // Render the stored NAIVE timestamp directly as text — no tz conversion.
             // (AT TIME ZONE 'UTC' on a naive TIMESTAMP yields a timestamptz, and
             // CAST(... AS TIMESTAMP) then re-localizes it to the session tz, shifting
@@ -56,10 +50,7 @@ fn canonical_expr(col: &ColumnSchema) -> Result<String> {
             // fractional zeros. Pad to a fixed 26-char layout:
             //   'YYYY-MM-DD HH:MM:SS.ffffff'
             // so both engines produce identical strings.
-            let ts_text = format!(
-                "CAST({} AS VARCHAR)",
-                col.name
-            );
+            let ts_text = format!("CAST({} AS VARCHAR)", col.name);
             // Ensure exactly 6 fractional digits (26 chars total).
             let rendered = format!(
                 "CASE WHEN POSITION('.' IN {txt}) = 0 \
@@ -82,7 +73,7 @@ fn canonical_expr(col: &ColumnSchema) -> Result<String> {
                 0 => format!("LEFT({}, 19)", rendered),
                 _ => format!("LEFT({}, {})", rendered, 20 + precision),
             }
-        },
+        }
     };
     Ok(wrap(col, payload))
 }
@@ -91,6 +82,12 @@ impl Dialect for DuckDBDialect {
     // Joindiff fast-exit precheck: COUNT(*) + one order-independent whole-table
     // checksum per side. If both match across sides, the tables are identical
     // and we stop — the common case made cheap.
+    // Otherwise, 'FULL OUTER JOIN' on the key, emitting the KEY of rows present
+    // only left (-), only right (+), or differing (~). Only the key is returned —
+    // the compared columns live in the WHERE predicate, server-side, so no row
+    // data leaves the database.
+
+    // Whole table checskum function (fast-exit precheck)
     fn whole_table_checksum_sql(&self, table: &TableRef, plan: &ComparePlan) -> Result<String> {
         // Include the key in the checksum as well as the compared columns, so a
         // changed key is itself a detectable difference
@@ -115,20 +112,15 @@ impl Dialect for DuckDBDialect {
         // resolve the resulting HUGEINT arithmetic ("No function matches … '(HUGEINT,
         // HUGEINT)'") on a fresh connection. Casting straight to UBIGINT sidesteps
         // it. (HUGEINT/INT128 is NOT a valid target for a '0x…' string cast.)
-        let half_unsigned = |start: i32| {
-            format!("CAST(('0x' || substr({digest}, {start}, 16)) AS UBIGINT)")
-        };
+        let half_unsigned =
+            |start: i32| format!("CAST(('0x' || substr({digest}, {start}, 16)) AS UBIGINT)");
 
         // Per segment/table: SUM each half, reduce mod 2^64, and carry COUNT(*).
         // Summation is what makes this order-independent — no ORDER BY, which is
         // most of the speed. Each engine MUST reproduce this arithmetic bit-for-
         // bit; the conformance suite is what enforces that. This block is shared
-        // with segment_checksum_sql — factor it into a private helper rather than
-        // writing it twice.
-        let from = match &table.schema {
-            Some(s) => format!("{}.{}", s, table.name),
-            None => table.name.clone(),
-        };
+        // with segment_checksum_sql
+        let from = from_table(table);
 
         Ok(format!(
             "SELECT \
@@ -142,13 +134,50 @@ impl Dialect for DuckDBDialect {
         ))
     }
 
-    // joindiff: full outer join
-    fn joindiff_sql(&self, _a: &TableRef, _b: &TableRef, _plan: &ComparePlan) -> Result<String> {
-        todo!()
+    // if whole table checksum returns a mismatch, run FULL OUTER JOIN
+    // on the key over normalized column
+    fn joindiff_sql(
+        &self,
+        a: &TableRef,
+        b: &TableRef,
+        plan: &ComparePlan,
+    ) -> Result<JoinDiffQuery> {
+        let join_key = plan.key.name.clone();
+        let left_only = format!(
+            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE b.{} IS NULL",
+            aliased_key("a", &plan.key),
+            from_table(a),
+            from_table(b),
+            join_key,
+            join_key
+        );
+        let right_only = format!(
+            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE a.{} IS NULL",
+            aliased_key("b", &plan.key),
+            from_table(a),
+            from_table(b),
+            join_key,
+            join_key
+        );
+        let differing = format!(
+            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE a.{} IS NOT NULL AND b.{} IS NOT NULL AND ({})",
+            aliased_key("a", &plan.key),
+            from_table(a),
+            from_table(b),
+            join_key,
+            join_key,
+            join_key,
+            mimatch_condition(plan)
+        );
+        Ok(JoinDiffQuery {
+            left_only,
+            right_only,
+            differing,
+        })
     }
 
     // hashdiff: normalization matrix - One column -> canonical SQL expression
-    fn normalize_column(&self, _col: &ColumnSchema) -> Result<String>{
+    fn normalize_column(&self, _col: &ColumnSchema) -> Result<String> {
         todo!()
     }
 
@@ -156,14 +185,19 @@ impl Dialect for DuckDBDialect {
     fn digest_expr(&self, _canon_cols: &[String]) -> Result<String> {
         todo!()
     }
-    
+
     // hashdiff: bound the keyspace
     fn keyspace_bounds_sql(&self, _table: &TableRef, _key: &ColumnSchema) -> Result<String> {
         todo!()
     }
 
     // hashdiff: one segment's checksum tuple, server-side execution
-    fn segment_checksum_sql(&self, _table: &TableRef, _plan: &ComparePlan, _segment: &Segment) -> Result<String> {
+    fn segment_checksum_sql(
+        &self,
+        _table: &TableRef,
+        _plan: &ComparePlan,
+        _segment: &Segment,
+    ) -> Result<String> {
         todo!()
     }
 
@@ -171,5 +205,4 @@ impl Dialect for DuckDBDialect {
     fn segment_rows_sql(&self, _table: &TableRef, _plan: &ComparePlan) -> Result<String> {
         todo!()
     }
-
 }

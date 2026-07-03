@@ -1,7 +1,7 @@
 # Veritable — Status, Decisions & Remaining Work
 
-_Last updated: 2026-06-28_
-_note: This document is AI-generated, here is the prompt "explore the veritable craates codebase and try to document the current status, decisions made and what remains to do, output in a file named STATUS.md in doc/ folder" 
+_Last updated: 2026-07-03_
+_note: This document is AI-generated, here is the prompt "explore the veritable crates codebase and try to document the current status, decisions made and what remains to do, output in a file named STATUS.md in docs/ folder" 
 
 Veritable (`vrtb`) is a local and cross-database result-set comparison engine.
 It canonicalizes each row to a byte-identical string on every supported engine,
@@ -19,9 +19,13 @@ shape, and what is still stubbed.
 crates/
   vrtb-core    Pure traits + engine-agnostic logic. NO database drivers.
                - engine.rs       Engine / Dialect traits, LogicalType, ComparePlan, …
-               - conformance.rs  whole_table_checksum + conformance_check (over the Engine trait)
+               - conformance.rs  whole_table_checksum + conformance_check + row-level
+                                 joindiff output (output_diff), over the Engine trait
+               - format.rs       Format enum (human/summary/json/jsonl), re-exported by CLI
                - error.rs        VeritableError + exit codes
-               - lib.rs          build_plan, joindiff/hashdiff (stubs)
+               - lib.rs          build_plan, joindiff/hashdiff (free-fn stubs)
+  vrtb-utils   Shared engine-agnostic SQL fragment builders: from_table,
+               aliased_key, mimatch_condition, canonical NULL/value wrapper
   vrtb-pg      PostgresEngine + PgDialect (feature: postgres, default on)
   vrtb-duck    DuckDBEngine + DuckDBDialect (feature: duckdb, default on)
   vrtb-cli     `veritable` binary: check / conformance / diff(stub) + live tests
@@ -29,10 +33,13 @@ crates/
 
 `vrtb-integ` (a test-only crate) **was removed** — see §3.
 
-Dependency direction: `vrtb-pg` / `vrtb-duck` / `vrtb-cli` depend on `vrtb-core`;
-`vrtb-core` depends on **nothing DB-related**. This is why the live cross-engine
-tests live in `vrtb-cli` (the only crate that can construct both concrete
-engines) and the engine-agnostic comparison logic lives in `vrtb-core`.
+Dependency direction: `vrtb-utils` / `vrtb-pg` / `vrtb-duck` / `vrtb-cli` all depend
+on `vrtb-core`; `vrtb-core` depends on **nothing DB-related** (only `thiserror` and
+`clap` — the latter for the shared `Format` enum). `Format` deliberately lives in
+`vrtb-core`, not the CLI, so the engine-agnostic `output_diff` can render results
+without core depending on the CLI crate (which would be a build cycle). This is why
+the live cross-engine tests live in `vrtb-cli` (the only crate that can construct
+both concrete engines) and the engine-agnostic comparison logic lives in `vrtb-core`.
 
 ---
 
@@ -75,6 +82,29 @@ conversion (`TO_CHAR(created_at, …)` on PG, `CAST(created_at AS VARCHAR)` on
 DuckDB). Verified to produce identical per-column checksums across engines.
 UTC-normalizing genuinely tz-aware columns is deferred to a future `--assume-tz`
 branch.
+
+### 2.3 Joindiff SQL was non-functional (3 bugs)
+
+`joindiff_sql` in both dialects generated invalid SQL, so the first `check` that
+reached the join-diff path (checksums differ, same engine) errored at prepare
+time. Three bugs, all fixed:
+
+1. **`"-"`/`"+"`/`"~"` markers were double-quoted** → parsed as column
+   *identifiers*, not string literals (`Binder Error: Referenced column "-" not
+   found`). The marker is now supplied by the formatter (`output_diff`), so the
+   literal was dropped from the SQL entirely.
+2. **Empty projection / dangling comma** — with no `--columns` the projection was
+   empty (`SELECT , FROM …`), and the key was never selected at all. The
+   projection is now the key column, always (`aliased_key`). `mimatch_condition`
+   also returns `FALSE` (not `""`) when there are no compared columns, keeping the
+   caller's `AND (…)` valid SQL.
+3. **Alias-vs-table-name qualifier** — columns were qualified by table name
+   (`customers_src.name`) while the FROM clause aliases the sides as `a`/`b`, so
+   the references would not resolve. Now qualified through the alias.
+
+Verified against the seeded DuckDB (`customers_src` vs `customers_dst`):
+100 src-only + 150 dst-only + 197 differing = the ~450 expected diffs, in all four
+`--format` outputs. See §6 for the output shapes and the ID-only guarantee.
 
 ---
 
@@ -140,11 +170,19 @@ veritable conformance \
 
 ## 5. What remains (stubs & known limits)
 
+**Implemented since last update:**
+- Both dialects: `joindiff_sql` — the `FULL OUTER JOIN` on the key. `check` /
+  `conformance` now run it automatically when the checksum precheck disagrees
+  (same-engine only), emitting the differing **keys** in the chosen `--format`
+  (see §6). Cross-engine mismatches still fall back to a "run hashdiff" hint.
+
 **Stubbed (`todo!()` / `unimplemented!()`):**
-- `vrtb-core`: `joindiff`, `hashdiff`.
-- Both dialects: `joindiff_sql`, `normalize_column`, `digest_expr`,
-  `keyspace_bounds_sql`, `segment_checksum_sql`, `segment_rows_sql`.
-- CLI `diff` subcommand (depends on joindiff/hashdiff).
+- `vrtb-core` free fns: `joindiff`, `hashdiff` (the live CLI path runs through
+  `conformance_check` + the dialect `joindiff_sql`, not these).
+- Both dialects: `normalize_column`, `digest_expr`, `keyspace_bounds_sql`,
+  `segment_checksum_sql`, `segment_rows_sql` (all hashdiff).
+- CLI `diff` subcommand — will surface differing column *values* at leaf level;
+  depends on hashdiff.
 
 **Known limitations / follow-ups:**
 - **`segment_checksum_sql`** will need the same `UBIGINT` formulation as the
@@ -163,3 +201,44 @@ veritable conformance \
   tz-aware columns is not implemented; only naive wall-clock rendering is.
 - **Decimal scale negotiation** — the dialects hardcode `NUMERIC(38, scale)`
   from `col.ty`; cross-side scale negotiation (`--coerce-scale`) is not built.
+
+---
+
+## 6. Output & the ID-only privacy guarantee
+
+**`check` / `conformance` output identifies *which* rows differ — never *what* the
+differing values are.** This is a hard rule, not a default: it upholds the README's
+non-negotiable "**no data leaves the user's machine/warehouse**" (§0.3).
+
+How it's enforced in the SQL: the joindiff `SELECT` projects the **key column
+only** —
+
+```sql
+SELECT a.id FROM customers_src a
+FULL OUTER JOIN customers_dst b USING (id)
+WHERE a.id IS NOT NULL AND b.id IS NOT NULL
+  AND (a.balance <> b.balance OR …)   -- compared columns live ONLY in the predicate
+```
+
+The compared columns (`name`, `balance`, …) appear **only inside the server-side
+`WHERE` predicate**, where the database evaluates them. They are never selected,
+so no user value ever travels to the client or to stdout — only primary keys do.
+This is implemented by `vrtb_utils::sql::aliased_key`, which by construction can
+emit nothing but the key. Surfacing the differing column *values* is deliberately
+the future `diff` command's job (an explicit, opt-in leaf-row fetch), not a side
+effect of a conformance check.
+
+Output shapes per `--format` — one entry per differing key, marked `-` (only in
+src), `+` (only in dst), `~` (present both sides, values differ):
+
+| `--format` | Example |
+|---|---|
+| `human`   | `  - 3853`  /  `  + 10041`  /  `  ~ 271` |
+| `summary` | `differ: 100 only in src, 150 only in dst, 197 differing` |
+| `json`    | `{"result":"differ","src_only":[["3853"]],"dst_only":[…],"differing":[…]}` |
+| `jsonl`   | `{"op":"src_only","row":["3853"]}` … one JSON object per key |
+
+_Note: on a same-engine differ, the row-level joindiff output (from
+`conformance_check`) is currently followed by `emit`'s checksum-level verdict, so a
+`check` prints both. Reconciling that overlap — or moving all rendering into the
+CLI — is an open cleanup._

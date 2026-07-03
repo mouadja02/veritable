@@ -9,5 +9,7 @@ duckdb = ["dep:duckdb"]
 
 [dependencies]
 vrtb-core = { path = "../vrtb-core" }
+vrtb-utils = { path = "../vrtb-utils" }
+
 
 duckdb = { version = "1", features = ["bundled"], optional = true }
