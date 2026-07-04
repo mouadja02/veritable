@@ -17,7 +17,8 @@ pub enum VeritableError {
 pub type Result<T> = std::result::Result<T, VeritableError>;
 
 impl VeritableError {
-    pub fn exit_code(&self) -> i32 {
+    // u8 so it feeds `std::process::ExitCode::from` without a lossy cast.
+    pub fn exit_code(&self) -> u8 {
         match self {
             VeritableError::Config(_) => 1,
             VeritableError::Connectivity(_) => 2,

@@ -12,9 +12,9 @@ use crate::engine::{ComparePlan, Engine, JoinDiffQuery, TableRef};
 use crate::error::{Result, VeritableError};
 use crate::format::Format;
 
-// The fast-exit precheck tuple: row count plus the two 64-bit checksum halves
-// (kept as decimal strings — they are unsigned 64-bit values that may exceed
-// `i64`, and the engines already hand them back as text).
+/// The fast-exit precheck tuple: row count plus the two 64-bit checksum halves
+/// (kept as decimal strings — they are unsigned 64-bit values that may exceed
+/// `i64`, and the engines already hand them back as text).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChecksumResult {
     pub count: u64,
@@ -22,13 +22,13 @@ pub struct ChecksumResult {
     pub sum_h2: String,
 }
 
-// Outcome of comparing two sides.
+/// Outcome of comparing two sides.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    // Counts and both checksum halves matched — the tables are equal under the
-    // joindiff fast-exit precheck.
+    /// Counts and both checksum halves matched — the tables are equal under the
+    /// joindiff fast-exit precheck.
     Match,
-    // At least one of count / h1 / h2 differed.
+    /// At least one of count / h1 / h2 differed.
     Differ {
         src: ChecksumResult,
         dst: ChecksumResult,
@@ -41,8 +41,8 @@ impl Verdict {
     }
 }
 
-// Build the dialect's whole-table checksum SQL, run it on `engine`, and parse
-// the single `(cnt, sum_h1, sum_h2)` row it returns.
+/// Build the dialect's whole-table checksum SQL, run it on `engine`, and parse
+/// the single `(cnt, sum_h1, sum_h2)` row it returns.
 pub fn whole_table_checksum(
     engine: &dyn Engine,
     table: &TableRef,
@@ -58,9 +58,9 @@ pub fn whole_table_checksum(
 // `dst_only` rows are right-only (`+`), and `differing` rows share a key but
 // disagree on non-key columns (`~`).
 fn output_diff(
-    src_only: Vec<Vec<String>>,
-    dst_only: Vec<Vec<String>>,
-    differing: Vec<Vec<String>>,
+    src_only: &[Vec<String>],
+    dst_only: &[Vec<String>],
+    differing: &[Vec<String>],
     format: Format,
 ) -> Result<()> {
     match format {
@@ -72,13 +72,13 @@ fn output_diff(
                 dst_only.len(),
                 differing.len()
             );
-            for row in &src_only {
+            for row in src_only {
                 println!("  - {}", row.join(" | "));
             }
-            for row in &dst_only {
+            for row in dst_only {
                 println!("  + {}", row.join(" | "));
             }
-            for row in &differing {
+            for row in differing {
                 println!("  ~ {}", row.join(" | "));
             }
         }
@@ -93,16 +93,16 @@ fn output_diff(
         Format::Json => {
             println!(
                 r#"{{"result":"differ","src_only":{},"dst_only":{},"differing":{}}}"#,
-                json_rows(&src_only),
-                json_rows(&dst_only),
-                json_rows(&differing)
+                json_rows(src_only),
+                json_rows(dst_only),
+                json_rows(differing)
             );
         }
         Format::Jsonl => {
             for (op, rows) in [
-                ("src_only", &src_only),
-                ("dst_only", &dst_only),
-                ("differing", &differing),
+                ("src_only", src_only),
+                ("dst_only", dst_only),
+                ("differing", differing),
             ] {
                 for row in rows {
                     println!(r#"{{"op":"{}","row":{}}}"#, op, json_row(row));
@@ -144,7 +144,7 @@ fn json_rows(rows: &[Vec<String>]) -> String {
     format!("[{}]", items.join(","))
 }
 
-// Checksum both sides (which may be backed by different engines) and compare.
+/// Checksum both sides (which may be backed by different engines) and compare.
 pub fn conformance_check(
     src: &dyn Engine,
     src_table: &TableRef,
@@ -165,19 +165,15 @@ pub fn conformance_check(
             let src_only_rows = src.execute(&sql.left_only)?;
             let dst_only_rows = src.execute(&sql.right_only)?;
             let diff_rows = src.execute(&sql.differing)?;
-            // Print the queries to the console for debugging purposes
-            println!("Left-only query: {}", sql.left_only);
-            println!("Right-only query: {}", sql.right_only);
-            println!("Differing query: {}", sql.differing);
-            output_diff(src_only_rows, dst_only_rows, diff_rows, format)?;
+            output_diff(&src_only_rows, &dst_only_rows, &diff_rows, format)?;
         } else {
             // Cross-engine conformance check: engines disagree on checksums
             // but we cannot run a join-diff across engines. Just report the mismatch.
-            println!(
+            eprintln!(
                 "Cross-engine conformance check: engines disagree on checksums, but cannot run join-diff across engines."
             );
-            // We will sugguest runninh HashDiff for cross-engine conformance check
-            println!("Suggestion: Run HashDiff for cross-engine conformance check.");
+            // We will suggest running HashDiff for cross-engine conformance check
+            eprintln!("Suggestion: Run HashDiff for cross-engine conformance check.");
         }
         Verdict::Differ { src: s, dst: d }
     })

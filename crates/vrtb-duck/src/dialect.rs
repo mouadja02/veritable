@@ -2,38 +2,42 @@ use vrtb_core::engine::{
     ColumnSchema, ComparePlan, Dialect, JoinDiffQuery, LogicalType, Segment, TableRef,
 };
 use vrtb_core::error::Result;
-use vrtb_utils::sql::{aliased_key, from_table, mimatch_condition, wrap};
+use vrtb_utils::checks::checksum_select;
+use vrtb_utils::sql::{aliased_key, from_table, mismatch_condition, quote_ident, wrap};
 
 pub struct DuckDBDialect;
-
-// 2^64, as text, for the modular-sum arithmetic below. DuckDB NUMERIC handles
-const TWO_POW_64: &str = "18446744073709551616";
 
 // DuckDB specific canonical expression for a column, or Err if the type is unsupported.
 fn canonical_expr(col: &ColumnSchema) -> Result<String> {
     let payload = match col.ty {
         // Minimal decimal text. `42` -> "v42", `-7` -> "v-7". Unambiguous: both
         // engines render integers identically, no scale or locale to negotiate.
-        LogicalType::Int => format!("CAST({} AS VARCHAR)", col.name),
+        LogicalType::Int => format!("CAST({} AS VARCHAR)", quote_ident(&col.name)),
 
         // Raw UTF-8, passed through. This is the ONLY type whose payload can
         // contain the 0x1F separator (or a 'v'), so it's the only one that can
         // shift column boundaries — see the digest builder's collision note.
-        LogicalType::String => format!("CAST({} AS VARCHAR)", col.name),
+        LogicalType::String => format!("CAST({} AS VARCHAR)", quote_ident(&col.name)),
 
         // Booleans canonicalize to '1' / '0'. CAST(bool AS VARCHAR) would give
         // 'true'/'false' in Postgres but 't'/'f' elsewhere — so spell it out
         // explicitly instead of trusting each engine's text rendering.
-        LogicalType::Boolean => format!("CASE WHEN {} THEN '1' ELSE '0' END", col.name),
+        LogicalType::Boolean => {
+            format!("CASE WHEN {} THEN '1' ELSE '0' END", quote_ident(&col.name))
+        }
 
         // Lowercase hex. DuckDB ENCODE(bytea,'hex') is uppercase, which is
         // NOT the canonical form — so LOWER() is needed here.
-        LogicalType::Binary => format!("LOWER(ENCODE({}, 'hex'))", col.name),
+        LogicalType::Binary => format!("LOWER(ENCODE({}, 'hex'))", quote_ident(&col.name)),
 
         // Decimal — correct target form (fixed-point text at the *negotiated*
         // scale; trailing zeros preserved, e.g. 1.5 at scale 2 -> "1.50"):
         LogicalType::Decimal { scale } => {
-            format!(" CAST({} AS NUMERIC(38, {}))::TEXT", col.name, scale)
+            format!(
+                "CAST({} AS NUMERIC(38, {}))::TEXT",
+                quote_ident(&col.name),
+                scale
+            )
         }
         // Blocked on: `scale` must come from build_plan's negotiation, not
         // col.ty — two sides at scale 2 vs 4 is an error unless --coerce-scale.
@@ -50,7 +54,7 @@ fn canonical_expr(col: &ColumnSchema) -> Result<String> {
             // fractional zeros. Pad to a fixed 26-char layout:
             //   'YYYY-MM-DD HH:MM:SS.ffffff'
             // so both engines produce identical strings.
-            let ts_text = format!("CAST({} AS VARCHAR)", col.name);
+            let ts_text = format!("CAST({} AS VARCHAR)", quote_ident(&col.name));
             // Ensure exactly 6 fractional digits (26 chars total).
             let rendered = format!(
                 "CASE WHEN POSITION('.' IN {txt}) = 0 \
@@ -118,19 +122,12 @@ impl Dialect for DuckDBDialect {
         // Per segment/table: SUM each half, reduce mod 2^64, and carry COUNT(*).
         // Summation is what makes this order-independent — no ORDER BY, which is
         // most of the speed. Each engine MUST reproduce this arithmetic bit-for-
-        // bit; the conformance suite is what enforces that. This block is shared
-        // with segment_checksum_sql
-        let from = from_table(table);
-
-        Ok(format!(
-            "SELECT \
-               COUNT(*) AS cnt, \
-               CAST(COALESCE(SUM({h1}), 0) % {m} AS VARCHAR) AS sum_h1, \
-               CAST(COALESCE(SUM({h2}), 0) % {m} AS VARCHAR) AS sum_h2 \
-             FROM {from}",
-            h1 = half_unsigned(1),
-            h2 = half_unsigned(17),
-            m = TWO_POW_64,
+        // bit; the conformance suite is what enforces that. The SELECT skeleton
+        // is shared with segment_checksum_sql via checks::checksum_select.
+        Ok(checksum_select(
+            table,
+            &half_unsigned(1),
+            &half_unsigned(17),
         ))
     }
 
@@ -142,7 +139,7 @@ impl Dialect for DuckDBDialect {
         b: &TableRef,
         plan: &ComparePlan,
     ) -> Result<JoinDiffQuery> {
-        let join_key = plan.key.name.clone();
+        let join_key = quote_ident(&plan.key.name);
         let left_only = format!(
             "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE b.{} IS NULL",
             aliased_key("a", &plan.key),
@@ -167,7 +164,7 @@ impl Dialect for DuckDBDialect {
             join_key,
             join_key,
             join_key,
-            mimatch_condition(plan)
+            mismatch_condition(plan)
         );
         Ok(JoinDiffQuery {
             left_only,

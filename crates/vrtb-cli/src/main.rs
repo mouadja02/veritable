@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    // Row-level diff (not yet implemented).
+    /// Row-level diff (not yet implemented).
     Diff {
         #[arg(short, long)]
         src: String,
@@ -37,7 +37,7 @@ enum Commands {
         format: Format,
     },
 
-    // Whole-table checksum + count comparison of two tables.
+    /// Whole-table checksum + count comparison of two tables.
     Check {
         #[arg(short, long)]
         src: String,
@@ -51,7 +51,7 @@ enum Commands {
         format: Format,
     },
 
-    // Alias of `check`, framed as a cross-engine conformance assertion.
+    /// Alias of `check`, framed as a cross-engine conformance assertion.
     Conformance {
         #[arg(short, long)]
         src: String,
@@ -69,15 +69,15 @@ enum Commands {
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match run(cli) {
-        Ok(code) => std::process::ExitCode::from(code as u8),
+        Ok(code) => std::process::ExitCode::from(code),
         Err(e) => {
             eprintln!("Error: {e}");
-            std::process::ExitCode::from(e.exit_code() as u8)
+            std::process::ExitCode::from(e.exit_code())
         }
     }
 }
 
-fn run(cli: Cli) -> Result<i32> {
+fn run(cli: Cli) -> Result<u8> {
     match cli.command {
         Commands::Check {
             src,
@@ -107,7 +107,7 @@ fn run_checksum(
     key: &str,
     columns: Option<&[String]>,
     format: Format,
-) -> Result<i32> {
+) -> Result<u8> {
     let src_target = parse_target(src)?;
     let dst_target = parse_target(dst)?;
 

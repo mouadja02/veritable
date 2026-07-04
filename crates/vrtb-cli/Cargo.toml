@@ -11,5 +11,7 @@ path = "src/main.rs"
 vrtb-core = { path = "../vrtb-core" }
 vrtb-pg = { path = "../vrtb-pg" }
 vrtb-duck = { path = "../vrtb-duck" }
-clap = { version = "4", features = ["derive"] }
-load-dotenv = {version="0.1.2"}
+clap = { workspace = true }
+
+[dev-dependencies]
+load-dotenv = "0.1.2"

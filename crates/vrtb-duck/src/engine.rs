@@ -6,6 +6,7 @@ use duckdb::types::Value;
 
 use vrtb_core::engine::{ColumnSchema, Dialect, Engine, LogicalType, TableRef, TableSchema};
 use vrtb_core::error::{Result as CoreResult, VeritableError};
+use vrtb_utils::sql::from_table;
 
 use crate::dialect::DuckDBDialect;
 
@@ -109,20 +110,21 @@ impl Engine for DuckDBEngine {
     }
 
     fn introspect(&self, table: &TableRef) -> CoreResult<TableSchema> {
-        let qualified = match &table.schema {
-            Some(s) => format!("{}.{}", s, table.name),
-            None => table.name.clone(),
-        };
-        let sql = format!("PRAGMA table_info('{qualified}')");
-        let mut stmt = self.conn.prepare(&sql).map_err(duck_err)?;
+        let qualified = from_table(table);
+        // `notnull` must be quoted: DuckDB parses bare `notnull` as the
+        // Postgres-style postfix operator (`x NOTNULL`), not an identifier.
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(?)")
+            .map_err(duck_err)?;
         let mapped = stmt
-            .query_map([], |row| {
+            .query_map([&qualified], |row| {
                 Ok((
-                    row.get::<_, String>(1)?,         // name
-                    row.get::<_, String>(2)?,         // type
-                    row.get::<_, bool>(3)?,           // notnull
-                    row.get::<_, Option<String>>(4)?, // dflt_value
-                    row.get::<_, bool>(5)?,           // pk
+                    row.get::<_, String>(0)?,         // name
+                    row.get::<_, String>(1)?,         // type
+                    row.get::<_, bool>(2)?,           // notnull
+                    row.get::<_, Option<String>>(3)?, // dflt_value
+                    row.get::<_, bool>(4)?,           // pk
                 ))
             })
             .map_err(duck_err)?;
@@ -217,10 +219,10 @@ mod tests {
         assert_eq!(schema.columns.len(), 2);
         assert_eq!(schema.columns[0].name, "id");
         assert_eq!(schema.columns[0].ty, LogicalType::Int);
-        assert_eq!(schema.columns[0].primary_key, false);
+        assert!(!schema.columns[0].primary_key);
         assert_eq!(schema.columns[1].name, "name");
         assert_eq!(schema.columns[1].ty, LogicalType::String);
-        assert_eq!(schema.columns[1].primary_key, true);
+        assert!(schema.columns[1].primary_key);
 
         drop(engine);
         let _ = std::fs::remove_file(&db_path);

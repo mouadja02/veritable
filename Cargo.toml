@@ -7,3 +7,9 @@ members = [
     "crates/vrtb-utils"
 ]
 resolver = "2"
+
+# Shared versions — core re-exports clap's ValueEnum (Format), so core and the
+# CLI must stay on the same clap version.
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"

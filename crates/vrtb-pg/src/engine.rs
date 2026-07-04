@@ -12,6 +12,7 @@ use tokio_postgres::{Client, NoTls, Row};
 
 use vrtb_core::engine::{ColumnSchema, Dialect, Engine, LogicalType, TableRef, TableSchema};
 use vrtb_core::error::{Result as CoreResult, VeritableError};
+use vrtb_utils::sql::from_table;
 
 use crate::dialect::PgDialect;
 
@@ -22,26 +23,25 @@ pub struct PostgresEngine {
 }
 
 impl PostgresEngine {
-    fn name(&self) -> &str {
-        "Postgres"
-    }
-
     // Connect using any tokio-postgres config string — libpq `key=value` form
-    // or a `postgres://user:pass@host:port/db` URL.
+    // or a `postgres://user:pass@host:port/db` URL. The conn string is NOT
+    // echoed into errors — it can carry a password.
     pub fn connect(conn_str: &str) -> CoreResult<Self> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| VeritableError::Connectivity(format!("{}: {}", conn_str, e)))?;
+            .map_err(|e| VeritableError::Connectivity(format!("tokio runtime: {e}")))?;
 
         let client = runtime.block_on(async {
             let (client, connection) = tokio_postgres::connect(conn_str, NoTls)
                 .await
-                .map_err(|e| VeritableError::Connectivity(format!("{}: {}", conn_str, e)))?;
+                .map_err(|e| VeritableError::Connectivity(format!("postgres connect: {e}")))?;
             // Drive the connection on this engine's runtime; it makes progress
             // whenever a later block_on(query) polls the runtime.
             tokio::spawn(async move {
-                let _ = connection.await;
+                if let Err(e) = connection.await {
+                    eprintln!("postgres connection error: {e}");
+                }
             });
             Ok::<_, VeritableError>(client)
         })?;
@@ -174,10 +174,7 @@ impl Engine for PostgresEngine {
     }
 
     fn introspect(&self, table: &TableRef) -> CoreResult<TableSchema> {
-        let qualified = match &table.schema {
-            Some(s) => format!("{}.{}", s, table.name),
-            None => table.name.clone(),
-        };
+        let qualified = from_table(table);
         let rows = self
             .runtime
             .block_on(self.client.query(INTROSPECT_SQL, &[&qualified]))

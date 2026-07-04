@@ -65,7 +65,7 @@ fn duck_identical_tables_match() {
         tref("customers_identical_src"),
         tref("customers_identical_dst"),
     );
-    let p = plan(&e, &s, &e, &d, KEY);
+    let p = plan(&e, &s, &e, &d, KEY).expect("plan");
     let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary).unwrap();
     assert!(v.is_match(), "identical DuckDB tables must match: {v:?}");
 }
@@ -74,7 +74,7 @@ fn duck_identical_tables_match() {
 fn duck_modified_tables_differ() {
     let e = duck();
     let (s, d) = (tref("customers_src"), tref("customers_dst"));
-    let p = plan(&e, &s, &e, &d, KEY);
+    let p = plan(&e, &s, &e, &d, KEY).expect("plan");
     let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary).unwrap();
     assert!(!v.is_match(), "modified DuckDB tables must differ");
 }
@@ -88,7 +88,7 @@ fn pg_identical_tables_match() {
         tref("customers_identical_src"),
         tref("customers_identical_dst"),
     );
-    let p = plan(&e, &s, &e, &d, KEY);
+    let p = plan(&e, &s, &e, &d, KEY).expect("plan");
     let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary).unwrap();
     assert!(v.is_match(), "identical PG tables must match: {v:?}");
 }
@@ -97,7 +97,7 @@ fn pg_identical_tables_match() {
 fn pg_modified_tables_differ() {
     let e = pg();
     let (s, d) = (tref("customers_src"), tref("customers_dst"));
-    let p = plan(&e, &s, &e, &d, KEY);
+    let p = plan(&e, &s, &e, &d, KEY).expect("plan");
     let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary).unwrap();
     assert!(!v.is_match(), "modified PG tables must differ");
 }
@@ -109,7 +109,7 @@ fn cross_engine_identical_checksums_match() {
     let p_eng = pg();
     let d_eng = duck();
     let t = tref("customers_identical_src");
-    let p = plan(&p_eng, &t, &d_eng, &t, KEY);
+    let p = plan(&p_eng, &t, &d_eng, &t, KEY).expect("plan");
     let v = conformance_check(&p_eng, &t, &d_eng, &t, &p, Format::Summary).unwrap();
     match v {
         Verdict::Match => {}
@@ -126,7 +126,7 @@ fn row_counts_match_seed() {
     let p_eng = pg();
     let d_eng = duck();
     let t = tref("customers_identical_src");
-    let p = plan(&p_eng, &t, &d_eng, &t, KEY);
+    let p = plan(&p_eng, &t, &d_eng, &t, KEY).expect("plan");
 
     let pg_ident = whole_table_checksum(&p_eng, &t, &p).unwrap();
     assert_eq!(pg_ident.count, 10_000, "seed creates 10k identical rows");
@@ -136,7 +136,7 @@ fn row_counts_match_seed() {
 
     // Modified dst: 10_000 - 100 deletes + 150 inserts = 10_050.
     let dst = tref("customers_dst");
-    let p_dst = plan(&p_eng, &dst, &p_eng, &dst, KEY);
+    let p_dst = plan(&p_eng, &dst, &p_eng, &dst, KEY).expect("plan");
     let pg_dst = whole_table_checksum(&p_eng, &dst, &p_dst).unwrap();
     assert_eq!(
         pg_dst.count, 10_050,

@@ -1,5 +1,6 @@
 use crate::error::Result;
 
+#[derive(Clone, Debug)]
 pub struct TableRef {
     pub schema: Option<String>,
     pub name: String,
@@ -15,7 +16,7 @@ pub enum LogicalType {
     Binary,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColumnSchema {
     pub name: String,
     pub ty: LogicalType,
@@ -24,16 +25,18 @@ pub struct ColumnSchema {
     pub primary_key: bool,
 }
 
+#[derive(Debug)]
 pub struct TableSchema {
     pub columns: Vec<ColumnSchema>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ComparePlan {
     pub key: ColumnSchema,
     pub columns: Vec<ColumnSchema>,
 } // resolved shared cols
 
+#[derive(Debug)]
 pub enum KeyValue {
     Int(i128),
     Bytes(Vec<u8>),
@@ -55,6 +58,7 @@ pub struct Checksum {
     count: u64,
 } // 128-bit checksum + count of rows
 
+#[derive(Debug)]
 pub enum DiffOp {
     Left,
     Right,
@@ -68,6 +72,7 @@ pub struct DiffRow {
     columns: Vec<Option<String>>,
 }
 
+#[derive(Debug)]
 pub struct JoinDiffQuery {
     pub left_only: String,
     pub right_only: String,
@@ -82,23 +87,23 @@ pub trait Engine {
 }
 
 pub trait Dialect {
-    // joindiff: fast-exit precheck (whole-table checksum + count)
+    /// joindiff: fast-exit precheck (whole-table checksum + count)
     fn whole_table_checksum_sql(&self, table: &TableRef, plan: &ComparePlan) -> Result<String>;
 
-    // joindiff: full outer join
+    /// joindiff: full outer join
     fn joindiff_sql(&self, a: &TableRef, b: &TableRef, plan: &ComparePlan)
     -> Result<JoinDiffQuery>;
 
-    // hashdiff: normalization matrix - One column -> canonical SQL expression
+    /// hashdiff: normalization matrix - One column -> canonical SQL expression
     fn normalize_column(&self, col: &ColumnSchema) -> Result<String>;
 
-    // hashdiff: per-row digest from canonical expressions -> md5 -> two u64 halves
+    /// hashdiff: per-row digest from canonical expressions -> md5 -> two u64 halves
     fn digest_expr(&self, canon_cols: &[String]) -> Result<String>;
 
-    // hashdiff: bound the keyspace
+    /// hashdiff: bound the keyspace
     fn keyspace_bounds_sql(&self, table: &TableRef, key: &ColumnSchema) -> Result<String>;
 
-    // hashdiff: one segment's checksum tuple, server-side execution
+    /// hashdiff: one segment's checksum tuple, server-side execution
     fn segment_checksum_sql(
         &self,
         table: &TableRef,
@@ -106,6 +111,6 @@ pub trait Dialect {
         segment: &Segment,
     ) -> Result<String>;
 
-    // hashdiff: leaf rows for a narrowed, still-disagreeing segment
+    /// hashdiff: leaf rows for a narrowed, still-disagreeing segment
     fn segment_rows_sql(&self, table: &TableRef, plan: &ComparePlan) -> Result<String>;
 }
