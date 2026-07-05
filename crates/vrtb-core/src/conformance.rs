@@ -144,19 +144,81 @@ fn json_rows(rows: &[Vec<String>]) -> String {
     format!("[{}]", items.join(","))
 }
 
-// Server-side materialization of the joindiff result. Implemented in a later
-// task; the signature is final. See docs/superpowers/specs/2026-07-05-materialize-design.md.
+// Tiny local identifier helpers. Deliberate duplication of vrtb_utils::sql:
+// core cannot depend on vrtb-utils (utils depends on core), and these two are
+// the only SQL fragments core ever builds itself.
+fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+fn qualified(t: &TableRef) -> String {
+    match &t.schema {
+        Some(s) => format!("{}.{}", quoted(s), quoted(&t.name)),
+        None => quoted(&t.name),
+    }
+}
+
+// Server-side materialization: one CTAS builds the op/key/src_row/dst_row diff
+// table inside the src-side database, then a single count read-back drives the
+// stdout summary. Row values never cross the wire — only per-op counts and the
+// table name do (README §0.3; STATUS §6 carve-out).
 fn materialize_diff(
-    _engine: &dyn Engine,
-    _a: &TableRef,
-    _b: &TableRef,
-    _plan: &ComparePlan,
-    _target: &TableRef,
-    _format: Format,
+    engine: &dyn Engine,
+    a: &TableRef,
+    b: &TableRef,
+    plan: &ComparePlan,
+    target: &TableRef,
+    format: Format,
 ) -> Result<()> {
-    Err(VeritableError::Engine(
-        "--materialize is not implemented yet".into(),
-    ))
+    let ctas = engine.dialect().materialize_sql(a, b, plan, target)?;
+    engine
+        .execute(&ctas)
+        .map_err(|e| VeritableError::Engine(format!("materialize {}: {e}", qualified(target))))?;
+
+    let counts_sql = format!(
+        "SELECT \"op\", COUNT(*) FROM {} GROUP BY \"op\"",
+        qualified(target)
+    );
+    let (mut src_only, mut dst_only, mut differing) = (0u64, 0u64, 0u64);
+    for r in engine.execute(&counts_sql)? {
+        if r.len() < 2 {
+            return Err(VeritableError::Query(
+                "materialize count query returned fewer than 2 columns".into(),
+            ));
+        }
+        let n: u64 = r[1].parse().map_err(|e| {
+            VeritableError::Query(format!("could not parse materialize count {:?}: {e}", r[1]))
+        })?;
+        match r[0].as_str() {
+            "-" => src_only = n,
+            "+" => dst_only = n,
+            "~" => differing = n,
+            other => {
+                return Err(VeritableError::Query(format!(
+                    "unexpected op {other:?} in materialized table"
+                )));
+            }
+        }
+    }
+
+    let table = qualified(target);
+    match format {
+        Format::Human => {
+            println!("DIFFER — row-level differences");
+            println!("  {src_only} only in src, {dst_only} only in dst, {differing} differing");
+            println!(
+                "  materialized {} rows to {table}",
+                src_only + dst_only + differing
+            );
+        }
+        Format::Summary => println!(
+            "differ: {src_only} only in src, {dst_only} only in dst, {differing} differing (materialized to {table})"
+        ),
+        Format::Json | Format::Jsonl => println!(
+            r#"{{"result":"differ","materialized":{{"table":"{}","src_only":{src_only},"dst_only":{dst_only},"differing":{differing}}}}}"#,
+            json_escape(&table)
+        ),
+    }
+    Ok(())
 }
 
 /// Checksum both sides (which may be backed by different engines) and compare.
@@ -294,21 +356,41 @@ mod tests {
         }
     }
 
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
     struct MockEngine {
         dialect: MockDialect,
+        name: &'static str,
         rows: Vec<Vec<String>>,
+        scripted: RefCell<VecDeque<Vec<Vec<String>>>>,
+        executed: RefCell<Vec<String>>,
     }
     impl MockEngine {
+        /// Every execute returns the same `rows` (legacy behavior).
         fn new(rows: Vec<Vec<String>>) -> Self {
             MockEngine {
                 dialect: MockDialect,
+                name: "mock",
                 rows,
+                scripted: RefCell::new(VecDeque::new()),
+                executed: RefCell::new(Vec::new()),
+            }
+        }
+        /// Consecutive executes pop `responses` front-to-back, then fall back to empty.
+        fn scripted(name: &'static str, responses: Vec<Vec<Vec<String>>>) -> Self {
+            MockEngine {
+                dialect: MockDialect,
+                name,
+                rows: Vec::new(),
+                scripted: RefCell::new(responses.into()),
+                executed: RefCell::new(Vec::new()),
             }
         }
     }
     impl Engine for MockEngine {
         fn name(&self) -> &str {
-            "mock"
+            self.name
         }
         fn introspect(&self, _t: &TableRef) -> Result<TableSchema> {
             unimplemented!()
@@ -316,7 +398,11 @@ mod tests {
         fn dialect(&self) -> &dyn Dialect {
             &self.dialect
         }
-        fn execute(&self, _sql: &str) -> Result<Vec<Vec<String>>> {
+        fn execute(&self, sql: &str) -> Result<Vec<Vec<String>>> {
+            self.executed.borrow_mut().push(sql.to_string());
+            if let Some(r) = self.scripted.borrow_mut().pop_front() {
+                return Ok(r);
+            }
             Ok(self.rows.clone())
         }
     }
@@ -402,5 +488,59 @@ mod tests {
     fn too_few_columns_is_error() {
         let eng = MockEngine::new(vec![vec!["5".into(), "aaa".into()]]);
         assert!(whole_table_checksum(&eng, &tref("t"), &plan()).is_err());
+    }
+
+    #[test]
+    fn materialize_runs_ctas_and_counts_only() {
+        let src = MockEngine::scripted(
+            "mock",
+            vec![
+                vec![row("5", "aaa", "bbb")], // whole-table checksum
+                vec![],                       // CTAS — no rows
+                vec![
+                    vec!["-".into(), "100".into()],
+                    vec!["+".into(), "150".into()],
+                    vec!["~".into(), "197".into()],
+                ], // count read-back
+            ],
+        );
+        let dst = MockEngine::scripted("mock", vec![vec![row("5", "aaa", "ZZZ")]]);
+        let target = tref("report");
+        let v = conformance_check(
+            &src, &tref("s"), &dst, &tref("d"), &plan(), Format::Summary, Some(&target),
+        )
+        .unwrap();
+        assert!(!v.is_match());
+        let executed = src.executed.borrow();
+        // checksum + CTAS + counts — and NO joindiff key-fetch queries.
+        assert_eq!(executed.len(), 3, "executed: {executed:?}");
+        assert_eq!(executed[1], "CTAS report");
+        assert!(executed[2].contains("GROUP BY \"op\""), "{}", executed[2]);
+        assert_eq!(dst.executed.borrow().len(), 1);
+    }
+
+    #[test]
+    fn materialize_on_match_creates_nothing() {
+        let src = MockEngine::new(vec![row("5", "aaa", "bbb")]);
+        let dst = MockEngine::new(vec![row("5", "aaa", "bbb")]);
+        let target = tref("report");
+        let v = conformance_check(
+            &src, &tref("s"), &dst, &tref("d"), &plan(), Format::Summary, Some(&target),
+        )
+        .unwrap();
+        assert!(v.is_match());
+        assert_eq!(src.executed.borrow().len(), 1, "checksum only — no CTAS");
+    }
+
+    #[test]
+    fn cross_engine_materialize_is_error() {
+        let src = MockEngine::scripted("mock", vec![vec![row("5", "aaa", "bbb")]]);
+        let dst = MockEngine::scripted("other", vec![vec![row("5", "aaa", "ZZZ")]]);
+        let target = tref("report");
+        let r = conformance_check(
+            &src, &tref("s"), &dst, &tref("d"), &plan(), Format::Summary, Some(&target),
+        );
+        assert!(r.is_err());
+        assert_eq!(src.executed.borrow().len(), 1, "no CTAS was attempted");
     }
 }
