@@ -58,7 +58,7 @@ pub fn parse_target(raw: &str) -> Result<Target> {
     })
 }
 
-fn parse_table(s: &str) -> TableRef {
+pub fn parse_table(s: &str) -> TableRef {
     match s.split_once('.') {
         Some((schema, name)) => TableRef {
             schema: Some(schema.into()),
@@ -71,15 +71,26 @@ fn parse_table(s: &str) -> TableRef {
     }
 }
 
-pub fn build_engine(spec: &EngineSpec) -> Result<Box<dyn Engine>> {
+/// True when both specs are the SAME DuckDB file. A writable DuckDB connection
+/// holds an exclusive file lock, so materialize must reuse one connection for
+/// both sides instead of opening the file twice.
+pub fn same_duckdb_file(a: &EngineSpec, b: &EngineSpec) -> bool {
+    matches!((a, b), (EngineSpec::DuckDb(p1), EngineSpec::DuckDb(p2)) if p1 == p2)
+}
+
+pub fn build_engine(spec: &EngineSpec, writable: bool) -> Result<Box<dyn Engine>> {
     match spec {
         EngineSpec::Postgres(dsn) => {
             let engine = PostgresEngine::connect(dsn)?;
             Ok(Box::new(engine))
         }
         EngineSpec::DuckDb(path) => {
-            let engine = DuckDBEngine::open_read_only(path)
-                .map_err(|e| VeritableError::Config(e.to_string()))?;
+            let engine = if writable {
+                DuckDBEngine::new(path)
+            } else {
+                DuckDBEngine::open_read_only(path)
+            }
+            .map_err(|e| VeritableError::Config(e.to_string()))?;
             Ok(Box::new(engine))
         }
     }
@@ -116,5 +127,27 @@ mod tests {
     #[test]
     fn rejects_unknown_engine() {
         assert!(parse_target("mysql://x#t").is_err());
+    }
+
+    #[test]
+    fn parse_table_splits_schema() {
+        let t = parse_table("main.report");
+        assert_eq!(t.schema.as_deref(), Some("main"));
+        assert_eq!(t.name, "report");
+        let t = parse_table("report");
+        assert_eq!(t.schema, None);
+        assert_eq!(t.name, "report");
+    }
+
+    #[test]
+    fn same_duckdb_file_matches_paths_only() {
+        let d1 = EngineSpec::DuckDb(PathBuf::from("a.duckdb"));
+        let d2 = EngineSpec::DuckDb(PathBuf::from("a.duckdb"));
+        let d3 = EngineSpec::DuckDb(PathBuf::from("b.duckdb"));
+        let p = EngineSpec::Postgres("postgres://x".into());
+        assert!(same_duckdb_file(&d1, &d2));
+        assert!(!same_duckdb_file(&d1, &d3));
+        assert!(!same_duckdb_file(&d1, &p));
+        assert!(!same_duckdb_file(&p, &p));
     }
 }

@@ -8,7 +8,8 @@ use vrtb_core::conformance::{Verdict, conformance_check};
 use vrtb_core::error::{Result, VeritableError};
 
 use format::Format;
-use spec::{build_engine, parse_target};
+use spec::{build_engine, parse_table, parse_target, same_duckdb_file};
+use vrtb_core::engine::Engine;
 
 #[derive(Parser)]
 #[command(
@@ -118,22 +119,40 @@ fn run_checksum(
     let src_target = parse_target(src)?;
     let dst_target = parse_target(dst)?;
 
-    let src_engine = build_engine(&src_target.spec)?;
-    let dst_engine = build_engine(&dst_target.spec)?;
+    // --materialize is same-connection joindiff only; reject cross-engine
+    // before connecting to anything.
+    if materialize.is_some()
+        && std::mem::discriminant(&src_target.spec) != std::mem::discriminant(&dst_target.spec)
+    {
+        return Err(VeritableError::Config(
+            "--materialize requires src and dst on the same connection (joindiff); \
+             cross-engine materialize arrives with hashdiff"
+                .into(),
+        ));
+    }
+
+    // The CTAS writes into the src-side database, so src opens writable when
+    // materializing. Same-file DuckDB must reuse the src connection: a writable
+    // DuckDB connection holds an exclusive file lock, so a second open fails.
+    let writable = materialize.is_some();
+    let src_engine = build_engine(&src_target.spec, writable)?;
+    let dst_engine: Option<Box<dyn Engine>> =
+        if writable && same_duckdb_file(&src_target.spec, &dst_target.spec) {
+            None
+        } else {
+            Some(build_engine(&dst_target.spec, false)?)
+        };
+    let dst_ref: &dyn Engine = dst_engine.as_deref().unwrap_or(src_engine.as_ref());
 
     let src_schema = src_engine.introspect(&src_target.table)?;
-    let dst_schema = dst_engine.introspect(&dst_target.table)?;
+    let dst_schema = dst_ref.introspect(&dst_target.table)?;
     let plan = build_plan(&src_schema, &dst_schema, columns, key)?;
 
-    let materialize_table = materialize.map(|t| vrtb_core::engine::TableRef {
-        schema: None,
-        name: t.to_string(),
-    });
-
+    let materialize_table = materialize.map(parse_table);
     let verdict = conformance_check(
         src_engine.as_ref(),
         &src_target.table,
-        dst_engine.as_ref(),
+        dst_ref,
         &dst_target.table,
         &plan,
         format,
