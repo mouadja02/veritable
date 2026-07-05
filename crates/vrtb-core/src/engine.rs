@@ -93,6 +93,17 @@ pub trait Dialect {
     /// joindiff: full outer join
     fn joindiff_sql(&self, a: &TableRef, b: &TableRef, plan: &ComparePlan) -> Result<JoinDiffQuery>;
 
+    /// materialize: one CREATE TABLE <target> AS … writing the joindiff result
+    /// (op / key / src_row / dst_row JSON) server-side. Plain CTAS: fails if
+    /// `target` exists — never drops or replaces (docs/superpowers spec, 2026-07-05).
+    fn materialize_sql(
+        &self,
+        a: &TableRef,
+        b: &TableRef,
+        plan: &ComparePlan,
+        target: &TableRef,
+    ) -> Result<String>;
+
     /// hashdiff: normalization matrix - One column -> canonical SQL expression
     fn normalize_column(&self, col: &ColumnSchema) -> Result<String>;
 

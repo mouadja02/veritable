@@ -168,6 +168,17 @@ impl Dialect for DuckDBDialect {
         })
     }
 
+    // materialize: implemented in the next task.
+    fn materialize_sql(
+        &self,
+        _a: &TableRef,
+        _b: &TableRef,
+        _plan: &ComparePlan,
+        _target: &TableRef,
+    ) -> Result<String> {
+        todo!()
+    }
+
     // hashdiff: normalization matrix - One column -> canonical SQL expression
     fn normalize_column(&self, _col: &ColumnSchema) -> Result<String> {
         todo!()

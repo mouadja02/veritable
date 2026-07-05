@@ -3,7 +3,10 @@ use vrtb_core::engine::{
 };
 use vrtb_core::error::Result;
 use vrtb_utils::checks::{TWO_POW_64, checksum_select};
-use vrtb_utils::sql::{aliased_key, mismatch_condition, outer_join_from, quote_ident, wrap};
+use vrtb_utils::sql::{
+    aliased_key, from_table, json_object_args, mismatch_condition, outer_join_from, quote_ident,
+    wrap,
+};
 
 pub struct PgDialect;
 
@@ -157,6 +160,32 @@ impl Dialect for PgDialect {
         })
     }
 
+    // materialize: one server-side CTAS, three UNION ALL branches over the same
+    // join skeleton joindiff uses. `key` is selected UNqualified — after USING
+    // it is the coalesced value, correct in all three branches. Values go into
+    // JSONB columns built only from the plan's compared columns; they never
+    // leave the database (README §0.3) — the caller reads back counts only.
+    fn materialize_sql(
+        &self,
+        a: &TableRef,
+        b: &TableRef,
+        plan: &ComparePlan,
+        target: &TableRef,
+    ) -> Result<String> {
+        let join = outer_join_from(a, b, &plan.key);
+        let key = quote_ident(&plan.key.name);
+        let src_json = format!("jsonb_build_object({})", json_object_args("a", &plan.columns));
+        let dst_json = format!("jsonb_build_object({})", json_object_args("b", &plan.columns));
+        Ok(format!(
+            "CREATE TABLE {target} AS \
+             SELECT '-' AS \"op\", {key} AS \"key\", {src_json} AS \"src_row\", CAST(NULL AS JSONB) AS \"dst_row\" {join} WHERE b.{key} IS NULL \
+             UNION ALL SELECT '+', {key}, CAST(NULL AS JSONB), {dst_json} {join} WHERE a.{key} IS NULL \
+             UNION ALL SELECT '~', {key}, {src_json}, {dst_json} {join} WHERE a.{key} IS NOT NULL AND b.{key} IS NOT NULL AND ({mismatch})",
+            target = from_table(target),
+            mismatch = mismatch_condition(plan),
+        ))
+    }
+
     // hashdiff: normalization matrix - One column -> canonical SQL expression
     fn normalize_column(&self, _col: &ColumnSchema) -> Result<String> {
         todo!()
@@ -185,5 +214,45 @@ impl Dialect for PgDialect {
     // hashdiff: leaf rows for a narrowed, still-disagreeing segment
     fn segment_rows_sql(&self, _table: &TableRef, _plan: &ComparePlan) -> Result<String> {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn col(name: &str, ty: LogicalType) -> ColumnSchema {
+        ColumnSchema {
+            name: name.into(),
+            ty,
+            nullable: true,
+            default_value: None,
+            primary_key: false,
+        }
+    }
+
+    fn tref(name: &str) -> TableRef {
+        TableRef { schema: None, name: name.into() }
+    }
+
+    #[test]
+    fn materialize_sql_builds_three_branch_ctas() {
+        let plan = ComparePlan {
+            key: col("id", LogicalType::Int),
+            columns: vec![col("name", LogicalType::String)],
+        };
+        let sql = PgDialect
+            .materialize_sql(&tref("src"), &tref("dst"), &plan, &tref("report"))
+            .unwrap();
+        assert!(sql.starts_with("CREATE TABLE \"report\" AS SELECT "));
+        assert!(sql.contains(
+            "SELECT '-' AS \"op\", \"id\" AS \"key\", \
+             jsonb_build_object('name', a.\"name\") AS \"src_row\", \
+             CAST(NULL AS JSONB) AS \"dst_row\" \
+             FROM \"src\" a FULL OUTER JOIN \"dst\" b USING (\"id\") WHERE b.\"id\" IS NULL"
+        ));
+        assert!(sql.contains("UNION ALL SELECT '+', \"id\", CAST(NULL AS JSONB), jsonb_build_object('name', b.\"name\")"));
+        assert!(sql.contains("UNION ALL SELECT '~', \"id\", jsonb_build_object('name', a.\"name\"), jsonb_build_object('name', b.\"name\")"));
+        assert!(sql.contains("WHERE a.\"id\" IS NOT NULL AND b.\"id\" IS NOT NULL AND ("));
     }
 }

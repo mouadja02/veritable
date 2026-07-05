@@ -79,6 +79,30 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// SQL string literal: wrap in single quotes, escape embedded quotes by doubling.
+pub fn quote_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// The alternating `'name', alias."name"` argument list for the dialects' JSON
+/// object constructors (PG jsonb_build_object / DuckDB json_object). Text keys
+/// make arbitrary column names safe. Empty `cols` yields an empty string — both
+/// constructors accept zero arguments and return `{}`.
+pub fn json_object_args(alias: &str, cols: &[ColumnSchema]) -> String {
+    let pairs: Vec<String> = cols
+        .iter()
+        .map(|c| {
+            format!(
+                "{}, {}.{}",
+                quote_literal(&c.name),
+                alias,
+                quote_ident(&c.name)
+            )
+        })
+        .collect();
+    pairs.join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +116,23 @@ mod tests {
             default_value: None,
             primary_key: true,
         }
+    }
+
+    #[test]
+    fn quote_literal_escapes_single_quotes() {
+        assert_eq!(quote_literal("plain"), "'plain'");
+        assert_eq!(quote_literal("O'Brien"), "'O''Brien'");
+    }
+
+    #[test]
+    fn json_object_args_alternates_name_and_value() {
+        let cols = vec![int_col("id"), int_col("n")];
+        assert_eq!(json_object_args("a", &cols), "'id', a.\"id\", 'n', a.\"n\"");
+    }
+
+    #[test]
+    fn json_object_args_empty_is_empty_string() {
+        assert_eq!(json_object_args("a", &[]), "");
     }
 
     #[test]

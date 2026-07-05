@@ -263,6 +263,15 @@ mod tests {
                 differing: "DIFF".into(),
             })
         }
+        fn materialize_sql(
+            &self,
+            _a: &TableRef,
+            _b: &TableRef,
+            _p: &ComparePlan,
+            target: &TableRef,
+        ) -> Result<String> {
+            Ok(format!("CTAS {}", target.name))
+        }
         fn normalize_column(&self, _c: &ColumnSchema) -> Result<String> {
             unimplemented!()
         }
