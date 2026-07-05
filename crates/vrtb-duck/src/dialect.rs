@@ -3,7 +3,7 @@ use vrtb_core::engine::{
 };
 use vrtb_core::error::Result;
 use vrtb_utils::checks::checksum_select;
-use vrtb_utils::sql::{aliased_key, from_table, mismatch_condition, quote_ident, wrap};
+use vrtb_utils::sql::{aliased_key, mismatch_condition, outer_join_from, quote_ident, wrap};
 
 pub struct DuckDBDialect;
 
@@ -140,28 +140,23 @@ impl Dialect for DuckDBDialect {
         plan: &ComparePlan,
     ) -> Result<JoinDiffQuery> {
         let join_key = quote_ident(&plan.key.name);
+        let join = outer_join_from(a, b, &plan.key);
         let left_only = format!(
-            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE b.{} IS NULL",
+            "SELECT {} {} WHERE b.{} IS NULL",
             aliased_key("a", &plan.key),
-            from_table(a),
-            from_table(b),
-            join_key,
+            join,
             join_key
         );
         let right_only = format!(
-            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE a.{} IS NULL",
+            "SELECT {} {} WHERE a.{} IS NULL",
             aliased_key("b", &plan.key),
-            from_table(a),
-            from_table(b),
-            join_key,
+            join,
             join_key
         );
         let differing = format!(
-            "SELECT {} FROM {} a FULL OUTER JOIN {} b USING ({}) WHERE a.{} IS NOT NULL AND b.{} IS NOT NULL AND ({})",
+            "SELECT {} {} WHERE a.{} IS NOT NULL AND b.{} IS NOT NULL AND ({})",
             aliased_key("a", &plan.key),
-            from_table(a),
-            from_table(b),
-            join_key,
+            join,
             join_key,
             join_key,
             mismatch_condition(plan)

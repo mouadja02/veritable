@@ -40,6 +40,18 @@ pub fn aliased_key(alias: &str, key: &ColumnSchema) -> String {
     format!("{}.{}", alias, quote_ident(&key.name))
 }
 
+/// The joindiff/materialize FROM clause: both sides aliased `a`/`b`, FULL OUTER
+/// joined USING the key. Shared so the key-streaming and materialize paths can
+/// never drift apart on join semantics.
+pub fn outer_join_from(a: &TableRef, b: &TableRef, key: &ColumnSchema) -> String {
+    format!(
+        "FROM {} a FULL OUTER JOIN {} b USING ({})",
+        from_table(a),
+        from_table(b),
+        quote_ident(&key.name)
+    )
+}
+
 pub fn mismatch_condition(plan: &ComparePlan) -> String {
     // With no compared columns, two key-matched rows can never differ; emit a
     // constant-false predicate so the caller's `AND (...)` stays valid SQL
@@ -70,6 +82,27 @@ pub fn quote_ident(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vrtb_core::engine::LogicalType;
+
+    fn int_col(name: &str) -> ColumnSchema {
+        ColumnSchema {
+            name: name.into(),
+            ty: LogicalType::Int,
+            nullable: false,
+            default_value: None,
+            primary_key: true,
+        }
+    }
+
+    #[test]
+    fn outer_join_from_builds_full_outer_join() {
+        let a = TableRef { schema: None, name: "src".into() };
+        let b = TableRef { schema: None, name: "dst".into() };
+        assert_eq!(
+            outer_join_from(&a, &b, &int_col("id")),
+            "FROM \"src\" a FULL OUTER JOIN \"dst\" b USING (\"id\")"
+        );
+    }
 
     #[test]
     fn quotes_plain_ident() {
