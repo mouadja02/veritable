@@ -175,6 +175,13 @@ veritable conformance \
   `conformance` now run it automatically when the checksum precheck disagrees
   (same-engine only), emitting the differing **keys** in the chosen `--format`
   (see §6). Cross-engine mismatches still fall back to a "run hashdiff" hint.
+- `--materialize <table>` (check/conformance, same-engine): one server-side
+  CTAS writes `op`/`key`/`src_row`/`dst_row` (JSON of compared columns) into a
+  new table; fails if the table exists; stdout gets counts only. Src engine
+  opens writable (DuckDB same-file runs reuse one connection — a writable
+  DuckDB connection holds an exclusive file lock). Cross-engine + materialize
+  is rejected at the CLI. New `Dialect::materialize_sql`; shared join skeleton
+  extracted to `vrtb_utils::sql::outer_join_from`.
 
 **Stubbed (`todo!()` / `unimplemented!()`):**
 - `vrtb-core` free fns: `joindiff`, `hashdiff` (the live CLI path runs through
@@ -242,3 +249,9 @@ _Note: on a same-engine differ, the row-level joindiff output (from
 `conformance_check`) is currently followed by `emit`'s checksum-level verdict, so a
 `check` prints both. Reconciling that overlap — or moving all rendering into the
 CLI — is an open cleanup._
+
+**Materialize carve-out:** with `--materialize`, row *values* are written into
+the diff table — but the CTAS runs entirely inside the user's database, so
+values still never cross the wire; the client reads back per-op counts only.
+Opt-in by flag, documented here as the one deliberate boundary of the ID-only
+rule.

@@ -30,7 +30,7 @@ Out of scope for all of v0.x: schema diffing/migration generation, data sync, pr
 ## 3. Algorithms
 
 ### Joindiff
-Fast-exit precheck first: `COUNT(*)` and a whole-table aggregate checksum on both sides; if both match, report identical and stop (the common case must be the cheap case). otherwise, `FULL OUTER JOIN` on the key over normalized column expressions, emitting rows present only left (`-`), only right (`+`), or differing (`~`) with differing columns identified. Results stream and an optional `--materialize <table>` writes them server-side instead.
+Fast-exit precheck first: `COUNT(*)` and a whole-table aggregate checksum on both sides; if both match, report identical and stop (the common case must be the cheap case). Otherwise, `FULL OUTER JOIN` on the key, streaming the **keys** of rows present only left (`-`), only right (`+`), or differing (`~`) — compared values stay inside the server-side predicate, so no row data ever reaches stdout. `--materialize <table>` instead writes the full diff server-side into a new table (`op`, `key`, `src_row`/`dst_row` as JSON, built from the compared columns); it fails if the table exists, values still never cross the wire, and only per-op counts are printed.
 
 ### Hashdiff
 *Coming in v0.2* must figure it out in the meantime
