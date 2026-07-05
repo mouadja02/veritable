@@ -14,7 +14,7 @@ use load_dotenv::load_dotenv;
 use std::path::PathBuf;
 
 use vrtb_core::conformance::{Verdict, conformance_check, whole_table_checksum};
-use vrtb_core::engine::TableRef;
+use vrtb_core::engine::{Engine, TableRef};
 use vrtb_core::format::Format;
 use vrtb_core::plan;
 use vrtb_duck::engine::DuckDBEngine;
@@ -47,6 +47,16 @@ fn duck() -> DuckDBEngine {
         .join("duckdb")
         .join("veritable.duckdb");
     DuckDBEngine::open_read_only(&path).expect("open seeded DuckDB file")
+}
+
+fn duck_rw() -> DuckDBEngine {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("data")
+        .join("duckdb")
+        .join("veritable.duckdb");
+    DuckDBEngine::new(&path).expect("open seeded DuckDB file read-write")
 }
 
 fn tref(name: &str) -> TableRef {
@@ -142,4 +152,95 @@ fn row_counts_match_seed() {
         pg_dst.count, 10_050,
         "dst = 10k - 100 deletes + 150 inserts"
     );
+}
+
+// ----- materialize -----
+
+#[test]
+fn pg_materialize_writes_diff_table() {
+    let e = pg();
+    e.execute("DROP TABLE IF EXISTS vrtb_mat_pg").unwrap();
+    let (s, d) = (tref("customers_src"), tref("customers_dst"));
+    let p = plan(&e, &s, &e, &d, KEY).expect("plan");
+    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary, Some(&tref("vrtb_mat_pg")))
+        .unwrap();
+    assert!(!v.is_match());
+
+    let counts = e
+        .execute("SELECT \"op\", COUNT(*) FROM vrtb_mat_pg GROUP BY \"op\" ORDER BY \"op\"")
+        .unwrap();
+    assert_eq!(
+        counts,
+        vec![
+            vec!["+".to_string(), "150".to_string()],
+            vec!["-".to_string(), "100".to_string()],
+            vec!["~".to_string(), "197".to_string()],
+        ]
+    );
+    let jsons = e
+        .execute(
+            "SELECT CAST(src_row AS VARCHAR), CAST(dst_row AS VARCHAR) \
+             FROM vrtb_mat_pg WHERE \"op\" = '~' LIMIT 1",
+        )
+        .unwrap();
+    assert!(!jsons[0][0].is_empty() && !jsons[0][1].is_empty());
+    assert_ne!(jsons[0][0], jsons[0][1], "a '~' row must differ between sides");
+    e.execute("DROP TABLE vrtb_mat_pg").unwrap();
+}
+
+#[test]
+fn duck_materialize_writes_diff_table() {
+    let e = duck_rw();
+    e.execute("DROP TABLE IF EXISTS vrtb_mat_duck").unwrap();
+    let (s, d) = (tref("customers_src"), tref("customers_dst"));
+    let p = plan(&e, &s, &e, &d, KEY).expect("plan");
+    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary, Some(&tref("vrtb_mat_duck")))
+        .unwrap();
+    assert!(!v.is_match());
+
+    let counts = e
+        .execute("SELECT \"op\", COUNT(*) FROM vrtb_mat_duck GROUP BY \"op\" ORDER BY \"op\"")
+        .unwrap();
+    assert_eq!(
+        counts,
+        vec![
+            vec!["+".to_string(), "150".to_string()],
+            vec!["-".to_string(), "100".to_string()],
+            vec!["~".to_string(), "197".to_string()],
+        ]
+    );
+    let jsons = e
+        .execute(
+            "SELECT CAST(src_row AS VARCHAR), CAST(dst_row AS VARCHAR) \
+             FROM vrtb_mat_duck WHERE \"op\" = '~' LIMIT 1",
+        )
+        .unwrap();
+    assert!(!jsons[0][0].is_empty() && !jsons[0][1].is_empty());
+    assert_ne!(jsons[0][0], jsons[0][1], "a '~' row must differ between sides");
+    e.execute("DROP TABLE vrtb_mat_duck").unwrap();
+}
+
+#[test]
+fn pg_materialize_fails_if_table_exists() {
+    let e = pg();
+    e.execute("DROP TABLE IF EXISTS vrtb_mat_exists").unwrap();
+    e.execute("CREATE TABLE vrtb_mat_exists (x INT)").unwrap();
+    let (s, d) = (tref("customers_src"), tref("customers_dst"));
+    let p = plan(&e, &s, &e, &d, KEY).expect("plan");
+    let r = conformance_check(&e, &s, &e, &d, &p, Format::Summary, Some(&tref("vrtb_mat_exists")));
+    assert!(r.is_err(), "existing target must fail, not be replaced");
+    // Untouched: still zero rows, still the original column.
+    let n = e.execute("SELECT COUNT(*) FROM vrtb_mat_exists").unwrap();
+    assert_eq!(n[0][0], "0");
+    e.execute("DROP TABLE vrtb_mat_exists").unwrap();
+}
+
+#[test]
+fn cross_engine_materialize_is_rejected() {
+    let p_eng = pg();
+    let d_eng = duck();
+    let (s, d) = (tref("customers_src"), tref("customers_dst"));
+    let p = plan(&p_eng, &s, &d_eng, &d, KEY).expect("plan");
+    let r = conformance_check(&p_eng, &s, &d_eng, &d, &p, Format::Summary, Some(&tref("nope")));
+    assert!(r.is_err(), "cross-engine materialize must be a hard error");
 }
