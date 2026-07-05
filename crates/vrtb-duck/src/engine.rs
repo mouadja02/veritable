@@ -169,7 +169,7 @@ impl Engine for DuckDBEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vrtb_core::engine::{Engine, LogicalType, TableRef};
+    use vrtb_core::engine::{ColumnSchema, ComparePlan, Engine, LogicalType, TableRef};
 
     fn tref(name: &str) -> TableRef {
         TableRef {
@@ -223,6 +223,70 @@ mod tests {
         assert_eq!(schema.columns[1].name, "name");
         assert_eq!(schema.columns[1].ty, LogicalType::String);
         assert!(schema.columns[1].primary_key);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn materialize_sql_executes_end_to_end() {
+        let dir = std::env::temp_dir().join("vrtb_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test_materialize.db");
+        let _ = std::fs::remove_file(&db_path);
+        let engine = DuckDBEngine::new(&db_path).unwrap();
+        engine
+            .conn
+            .execute_batch(
+                "CREATE TABLE src (id INTEGER, name VARCHAR); \
+                 CREATE TABLE dst (id INTEGER, name VARCHAR); \
+                 INSERT INTO src VALUES (1, 'a'), (2, 'b'), (3, 'c'); \
+                 INSERT INTO dst VALUES (2, 'b'), (3, 'CHANGED'), (4, 'd');",
+            )
+            .unwrap();
+
+        let plan = ComparePlan {
+            key: ColumnSchema {
+                name: "id".into(),
+                ty: LogicalType::Int,
+                nullable: false,
+                default_value: None,
+                primary_key: true,
+            },
+            columns: vec![ColumnSchema {
+                name: "name".into(),
+                ty: LogicalType::String,
+                nullable: true,
+                default_value: None,
+                primary_key: false,
+            }],
+        };
+        let sql = engine
+            .dialect()
+            .materialize_sql(&tref("src"), &tref("dst"), &plan, &tref("report"))
+            .unwrap();
+        engine.execute(&sql).unwrap();
+
+        // ASCII op order: '+' < '-' < '~'
+        let rows = engine
+            .execute(
+                "SELECT \"op\", CAST(\"key\" AS VARCHAR), CAST(\"src_row\" AS VARCHAR), CAST(\"dst_row\" AS VARCHAR) \
+                 FROM \"report\" ORDER BY \"op\", \"key\"",
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0][..2], ["+".to_string(), "4".to_string()]);
+        assert_eq!(rows[0][2], "", "src_row NULL for '+'");
+        assert!(rows[0][3].contains("\"name\""), "dst_row JSON for '+': {}", rows[0][3]);
+        assert_eq!(rows[1][..2], ["-".to_string(), "1".to_string()]);
+        assert_eq!(rows[1][3], "", "dst_row NULL for '-'");
+        assert_eq!(rows[2][..2], ["~".to_string(), "3".to_string()]);
+        assert!(rows[2][2].contains("'c'") || rows[2][2].contains("\"c\""));
+        assert!(rows[2][3].contains("CHANGED"));
+        assert_ne!(rows[2][2], rows[2][3], "'~' sides must differ");
+
+        // Fail-if-exists: a second CTAS against the same name must error.
+        assert!(engine.execute(&sql).is_err());
 
         drop(engine);
         let _ = std::fs::remove_file(&db_path);

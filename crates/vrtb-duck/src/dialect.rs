@@ -3,7 +3,10 @@ use vrtb_core::engine::{
 };
 use vrtb_core::error::Result;
 use vrtb_utils::checks::checksum_select;
-use vrtb_utils::sql::{aliased_key, mismatch_condition, outer_join_from, quote_ident, wrap};
+use vrtb_utils::sql::{
+    aliased_key, from_table, json_object_args, mismatch_condition, outer_join_from, quote_ident,
+    wrap,
+};
 
 pub struct DuckDBDialect;
 
@@ -168,15 +171,31 @@ impl Dialect for DuckDBDialect {
         })
     }
 
-    // materialize: implemented in the next task.
+    // materialize: one server-side CTAS, three UNION ALL branches over the same
+    // join skeleton joindiff uses. `key` is selected UNqualified — after USING
+    // it is the coalesced value, correct in all three branches. Values go into
+    // JSON columns (json extension, enabled via the crate's `json` feature)
+    // built only from the plan's compared columns; they never leave the
+    // database (README §0.3) — the caller reads back counts only.
     fn materialize_sql(
         &self,
-        _a: &TableRef,
-        _b: &TableRef,
-        _plan: &ComparePlan,
-        _target: &TableRef,
+        a: &TableRef,
+        b: &TableRef,
+        plan: &ComparePlan,
+        target: &TableRef,
     ) -> Result<String> {
-        todo!()
+        let join = outer_join_from(a, b, &plan.key);
+        let key = quote_ident(&plan.key.name);
+        let src_json = format!("json_object({})", json_object_args("a", &plan.columns));
+        let dst_json = format!("json_object({})", json_object_args("b", &plan.columns));
+        Ok(format!(
+            "CREATE TABLE {target} AS \
+             SELECT '-' AS \"op\", {key} AS \"key\", {src_json} AS \"src_row\", CAST(NULL AS JSON) AS \"dst_row\" {join} WHERE b.{key} IS NULL \
+             UNION ALL SELECT '+', {key}, CAST(NULL AS JSON), {dst_json} {join} WHERE a.{key} IS NULL \
+             UNION ALL SELECT '~', {key}, {src_json}, {dst_json} {join} WHERE a.{key} IS NOT NULL AND b.{key} IS NOT NULL AND ({mismatch})",
+            target = from_table(target),
+            mismatch = mismatch_condition(plan),
+        ))
     }
 
     // hashdiff: normalization matrix - One column -> canonical SQL expression

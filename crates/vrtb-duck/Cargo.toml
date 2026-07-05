@@ -12,4 +12,4 @@ vrtb-core = { path = "../vrtb-core" }
 vrtb-utils = { path = "../vrtb-utils" }
 
 
-duckdb = { version = "1", features = ["bundled"], optional = true }
+duckdb = { version = "1", features = ["bundled", "json"], optional = true }
