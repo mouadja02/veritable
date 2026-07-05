@@ -144,7 +144,24 @@ fn json_rows(rows: &[Vec<String>]) -> String {
     format!("[{}]", items.join(","))
 }
 
+// Server-side materialization of the joindiff result. Implemented in a later
+// task; the signature is final. See docs/superpowers/specs/2026-07-05-materialize-design.md.
+fn materialize_diff(
+    _engine: &dyn Engine,
+    _a: &TableRef,
+    _b: &TableRef,
+    _plan: &ComparePlan,
+    _target: &TableRef,
+    _format: Format,
+) -> Result<()> {
+    Err(VeritableError::Engine(
+        "--materialize is not implemented yet".into(),
+    ))
+}
+
 /// Checksum both sides (which may be backed by different engines) and compare.
+/// On a same-engine differ: stream differing keys (default) or, with
+/// `materialize`, write the full diff server-side into that table instead.
 pub fn conformance_check(
     src: &dyn Engine,
     src_table: &TableRef,
@@ -152,21 +169,40 @@ pub fn conformance_check(
     dst_table: &TableRef,
     plan: &ComparePlan,
     format: Format,
+    materialize: Option<&TableRef>,
 ) -> Result<Verdict> {
     let s = whole_table_checksum(src, src_table, plan)?;
     let d = whole_table_checksum(dst, dst_table, plan)?;
     Ok(if s == d {
+        if materialize.is_some() && matches!(format, Format::Human | Format::Summary) {
+            println!("nothing to materialize — tables already match");
+        }
         Verdict::Match
     } else {
-        // Run the joindiff
-        // Check if engines are the same (join-diff is engine-specific)
+        // Row-level joindiff needs both tables on one connection.
         if src.name() == dst.name() {
-            let sql: JoinDiffQuery = src.dialect().joindiff_sql(src_table, dst_table, plan)?;
-            let src_only_rows = src.execute(&sql.left_only)?;
-            let dst_only_rows = src.execute(&sql.right_only)?;
-            let diff_rows = src.execute(&sql.differing)?;
-            output_diff(&src_only_rows, &dst_only_rows, &diff_rows, format)?;
+            match materialize {
+                Some(target) => {
+                    materialize_diff(src, src_table, dst_table, plan, target, format)?;
+                }
+                None => {
+                    let sql: JoinDiffQuery =
+                        src.dialect().joindiff_sql(src_table, dst_table, plan)?;
+                    let src_only_rows = src.execute(&sql.left_only)?;
+                    let dst_only_rows = src.execute(&sql.right_only)?;
+                    let diff_rows = src.execute(&sql.differing)?;
+                    output_diff(&src_only_rows, &dst_only_rows, &diff_rows, format)?;
+                }
+            }
         } else {
+            // Defense in depth — the CLI rejects this before connecting.
+            if materialize.is_some() {
+                return Err(VeritableError::Config(
+                    "--materialize requires src and dst on the same connection (joindiff); \
+                     cross-engine materialize arrives with hashdiff"
+                        .into(),
+                ));
+            }
             // Cross-engine conformance check: engines disagree on checksums
             // but we cannot run a join-diff across engines. Just report the mismatch.
             eprintln!(
@@ -319,7 +355,7 @@ mod tests {
         let a = MockEngine::new(vec![row("5", "aaa", "bbb")]);
         let b = MockEngine::new(vec![row("5", "aaa", "bbb")]);
         let v =
-            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary).unwrap();
+            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary, None).unwrap();
         assert!(v.is_match());
     }
 
@@ -328,7 +364,7 @@ mod tests {
         let a = MockEngine::new(vec![row("5", "aaa", "bbb")]);
         let b = MockEngine::new(vec![row("5", "aaa", "ZZZ")]);
         let v =
-            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary).unwrap();
+            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary, None).unwrap();
         match v {
             Verdict::Differ { src, dst } => {
                 assert_eq!(src.sum_h2, "bbb");
@@ -343,7 +379,7 @@ mod tests {
         let a = MockEngine::new(vec![row("5", "aaa", "bbb")]);
         let b = MockEngine::new(vec![row("6", "aaa", "bbb")]);
         let v =
-            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary).unwrap();
+            conformance_check(&a, &tref("t"), &b, &tref("t"), &plan(), Format::Summary, None).unwrap();
         assert!(!v.is_match());
     }
 

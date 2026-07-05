@@ -49,6 +49,8 @@ enum Commands {
         columns: Option<Vec<String>>,
         #[arg(short, long, default_value_t = Format::Human)]
         format: Format,
+        #[arg(short, long)]
+        materialize: Option<String>
     },
 
     /// Alias of `check`, framed as a cross-engine conformance assertion.
@@ -63,6 +65,8 @@ enum Commands {
         columns: Option<Vec<String>>,
         #[arg(short, long, default_value_t = Format::Human)]
         format: Format,
+        #[arg(short, long)]
+        materialize: Option<String>
     },
 }
 
@@ -85,6 +89,7 @@ fn run(cli: Cli) -> Result<u8> {
             key,
             columns,
             format,
+            materialize,
         }
         | Commands::Conformance {
             src,
@@ -92,7 +97,8 @@ fn run(cli: Cli) -> Result<u8> {
             key,
             columns,
             format,
-        } => run_checksum(&src, &dst, &key, columns.as_deref(), format),
+            materialize,
+        } => run_checksum(&src, &dst, &key, columns.as_deref(), format, materialize.as_deref()),
         Commands::Diff { .. } => Err(VeritableError::Engine(
             "diff is not implemented yet (joindiff/hashdiff are stubs)".into(),
         )),
@@ -107,6 +113,7 @@ fn run_checksum(
     key: &str,
     columns: Option<&[String]>,
     format: Format,
+    materialize: Option<&str>,
 ) -> Result<u8> {
     let src_target = parse_target(src)?;
     let dst_target = parse_target(dst)?;
@@ -118,6 +125,11 @@ fn run_checksum(
     let dst_schema = dst_engine.introspect(&dst_target.table)?;
     let plan = build_plan(&src_schema, &dst_schema, columns, key)?;
 
+    let materialize_table = materialize.map(|t| vrtb_core::engine::TableRef {
+        schema: None,
+        name: t.to_string(),
+    });
+
     let verdict = conformance_check(
         src_engine.as_ref(),
         &src_target.table,
@@ -125,6 +137,7 @@ fn run_checksum(
         &dst_target.table,
         &plan,
         format,
+        materialize_table.as_ref(),
     )?;
 
     emit(&verdict, format);

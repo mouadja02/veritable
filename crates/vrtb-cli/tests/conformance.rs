@@ -66,7 +66,7 @@ fn duck_identical_tables_match() {
         tref("customers_identical_dst"),
     );
     let p = plan(&e, &s, &e, &d, KEY).expect("plan");
-    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary).unwrap();
+    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary, None).unwrap();
     assert!(v.is_match(), "identical DuckDB tables must match: {v:?}");
 }
 
@@ -75,7 +75,7 @@ fn duck_modified_tables_differ() {
     let e = duck();
     let (s, d) = (tref("customers_src"), tref("customers_dst"));
     let p = plan(&e, &s, &e, &d, KEY).expect("plan");
-    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary).unwrap();
+    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary, None).unwrap();
     assert!(!v.is_match(), "modified DuckDB tables must differ");
 }
 
@@ -89,7 +89,7 @@ fn pg_identical_tables_match() {
         tref("customers_identical_dst"),
     );
     let p = plan(&e, &s, &e, &d, KEY).expect("plan");
-    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary).unwrap();
+    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary, None).unwrap();
     assert!(v.is_match(), "identical PG tables must match: {v:?}");
 }
 
@@ -98,7 +98,7 @@ fn pg_modified_tables_differ() {
     let e = pg();
     let (s, d) = (tref("customers_src"), tref("customers_dst"));
     let p = plan(&e, &s, &e, &d, KEY).expect("plan");
-    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary).unwrap();
+    let v = conformance_check(&e, &s, &e, &d, &p, Format::Summary, None).unwrap();
     assert!(!v.is_match(), "modified PG tables must differ");
 }
 
@@ -110,7 +110,7 @@ fn cross_engine_identical_checksums_match() {
     let d_eng = duck();
     let t = tref("customers_identical_src");
     let p = plan(&p_eng, &t, &d_eng, &t, KEY).expect("plan");
-    let v = conformance_check(&p_eng, &t, &d_eng, &t, &p, Format::Summary).unwrap();
+    let v = conformance_check(&p_eng, &t, &d_eng, &t, &p, Format::Summary, None).unwrap();
     match v {
         Verdict::Match => {}
         Verdict::Differ { src, dst } => {

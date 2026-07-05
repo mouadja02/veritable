@@ -91,8 +91,7 @@ pub trait Dialect {
     fn whole_table_checksum_sql(&self, table: &TableRef, plan: &ComparePlan) -> Result<String>;
 
     /// joindiff: full outer join
-    fn joindiff_sql(&self, a: &TableRef, b: &TableRef, plan: &ComparePlan)
-    -> Result<JoinDiffQuery>;
+    fn joindiff_sql(&self, a: &TableRef, b: &TableRef, plan: &ComparePlan) -> Result<JoinDiffQuery>;
 
     /// hashdiff: normalization matrix - One column -> canonical SQL expression
     fn normalize_column(&self, col: &ColumnSchema) -> Result<String>;
